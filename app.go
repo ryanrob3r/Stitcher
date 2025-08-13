@@ -15,18 +15,18 @@ import (
 
 // VideoFile represents a single video file to be processed.
 type VideoFile struct {
-	Path       string `json:"path"`
-	FileName   string `json:"fileName"`
-	Size       int64  `json:"size"`
+	Path       string  `json:"path"`
+	FileName   string  `json:"fileName"`
+	Size       int64   `json:"size"`
 	Duration   float64 `json:"duration"`
-	Resolution string `json:"resolution"`
-	Codec      string `json:"codec"`
+	Resolution string  `json:"resolution"`
+	Codec      string  `json:"codec"`
 }
 
 // MergePreset defines the settings for the output video.
 type MergePreset struct {
 	Name    string `json:"name"`
-	Format  string `json:"format"` // e.g., "mp4", "mkv"
+	Format  string `json:"format"`  // e.g., "mp4", "mkv"
 	Quality int    `json:"quality"` // e.g., 22 (CRF value for H.264)
 }
 
@@ -34,10 +34,10 @@ type MergePreset struct {
 type JobStatus string
 
 const (
-	StatusPending   JobStatus = "pending"
-	StatusRunning   JobStatus = "running"
-	StatusComplete  JobStatus = "complete"
-	StatusError     JobStatus = "error"
+	StatusPending  JobStatus = "pending"
+	StatusRunning  JobStatus = "running"
+	StatusComplete JobStatus = "complete"
+	StatusError    JobStatus = "error"
 )
 
 // MergeJob represents a single project of merging multiple videos.
