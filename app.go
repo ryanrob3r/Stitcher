@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,12 +17,13 @@ import (
 
 // VideoFile represents a single video file to be processed.
 type VideoFile struct {
-	Path       string  `json:"path"`
-	FileName   string  `json:"fileName"`
-	Size       int64   `json:"size"`
-	Duration   float64 `json:"duration"`
-	Resolution string  `json:"resolution"`
-	Codec      string  `json:"codec"`
+	Path            string  `json:"path"`
+	FileName        string  `json:"fileName"`
+	Size            int64   `json:"size"`
+	Duration        float64 `json:"duration"`
+	Resolution      string  `json:"resolution"`
+	Codec           string  `json:"codec"`
+	ThumbnailBase64 string  `json:"thumbnailBase64"` // Base64 encoded thumbnail image
 }
 
 // MergePreset defines the settings for the output video.
@@ -142,60 +145,101 @@ func (a *App) SelectVideos() ([]VideoFile, error) {
 			Resolution: fmt.Sprintf("%dx%d", videoStream.Width, videoStream.Height),
 			Codec:      videoStream.CodecName,
 		}
+
+		// Generate thumbnail
+		thumbnail, err := a.GenerateThumbnail(path)
+		if err != nil {
+			log.Printf("Error generating thumbnail for %s: %v", path, err)
+			// Continue without thumbnail, or set a default fallback
+			videoFile.ThumbnailBase64 = ""
+		} else {
+			videoFile.ThumbnailBase64 = thumbnail
+		}
+
 		videoFiles = append(videoFiles, videoFile)
 	}
 
 	return videoFiles, nil
 }
 
+// GenerateThumbnail generates a base64 encoded thumbnail for a given video path.
+func (a *App) GenerateThumbnail(videoPath string) (string, error) {
+	// Use ffmpeg to extract a frame at 1 second mark and output as base64
+	cmd := exec.Command("ffmpeg", "-i", videoPath, "-ss", "00:00:01.000", "-vframes", "1", "-f", "image2pipe", "-")
+	
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf(`failed to generate thumbnail for %s: %s\n%s`, videoPath, err.Error(), stderr.String())
+	}
+
+	encodedString := base64.StdEncoding.EncodeToString(out.Bytes())
+	return "data:image/jpeg;base64," + encodedString, nil
+}
+
+// GetPresets returns a list of predefined merge presets.
+func (a *App) GetPresets() []MergePreset {
+	return []MergePreset{
+		{Name: "Fast Copy (Same Codec/Res)", Format: "copy", Quality: 0},
+		{Name: "MP4 (H.264) - High Quality", Format: "mp4", Quality: 18},
+		{Name: "MP4 (H.264) - Medium Quality", Format: "mp4", Quality: 23},
+		{Name: "WebM (VP9) - Medium Quality", Format: "webm", Quality: 28},
+    }
+}
+
 // MergeVideos takes a list of video files and merges them into a single output file.
 func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
-	if len(videoFiles) < 2 {
-		return "", fmt.Errorf("at least two videos are required to merge")
-	}
+    if len(videoFiles) < 2 {
+        return "", fmt.Errorf("at least two videos are required to merge")
+    }
 
-	// Compatibility Check
-	firstVideo := videoFiles[0]
-	for _, video := range videoFiles[1:] {
-		if video.Resolution != firstVideo.Resolution || video.Codec != firstVideo.Codec {
-			return "", fmt.Errorf("incompatible videos: all videos must have the same resolution and codec for a fast merge. Mismatched file: %s", video.FileName)
-		}
-	}
+    // Compatibility Check
+    firstVideo := videoFiles[0]
+    for _, video := range videoFiles[1:] {
+        if video.Resolution != firstVideo.Resolution || video.Codec != firstVideo.Codec {
+            return "", fmt.Errorf("incompatible videos: all videos must have the same resolution and codec for a fast merge. Mismatched file: %s", video.FileName)
+        }
+    }
 
-	// Ask user for save location
-	ext := filepath.Ext(firstVideo.Path)
-	outputFile, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
-		Title:           "Save Merged Video As...",
-		DefaultFilename: fmt.Sprintf("merged-video%s", ext),
-	})
-	if err != nil {
-		return "", err
-	}
-	if outputFile == "" {
-		return "", fmt.Errorf("save operation cancelled")
-	}
+    // Ask user for save location
+    ext := filepath.Ext(firstVideo.Path)
+    outputFile, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+        Title:           "Save Merged Video As...",
+        DefaultFilename: fmt.Sprintf("merged-video%s", ext),
+    })
+    if err != nil {
+        return "", err
+    }
+    if outputFile == "" {
+        return "", fmt.Errorf("save operation cancelled")
+    }
 
-	// Create a temporary file to list the inputs for ffmpeg
-	tempFile, err := os.CreateTemp("", "ffmpeg-list-*.txt")
-	if err != nil {
-		return "", fmt.Errorf("failed to create temp file for ffmpeg: %w", err)
-	}
-	defer os.Remove(tempFile.Name()) // Clean up the temp file
+    // Create a temporary file to list the inputs for ffmpeg
+    tempFile, err := os.CreateTemp("", "ffmpeg-list-*.txt")
+    if err != nil {
+        return "", fmt.Errorf("failed to create temp file for ffmpeg: %w", err)
+    }
+    defer os.Remove(tempFile.Name()) // Clean up the temp file
 
-	for _, video := range videoFiles {
-		// FFmpeg's concat demuxer requires file paths to be quoted if they contain special characters.
-		if _, err := tempFile.WriteString(fmt.Sprintf("file '%s'\n", video.Path)); err != nil {
-			return "", fmt.Errorf("failed to write to temp file: %w", err)
-		}
-	}
-	tempFile.Close()
+    for _, video := range videoFiles {
+        // FFmpeg's concat demuxer requires file paths to be quoted if they contain special characters.
+        if _, err := tempFile.WriteString(fmt.Sprintf("file '%s'\n", video.Path)); err != nil {
+            return "", fmt.Errorf("failed to write to temp file: %w", err)
+        }
+    }
+    tempFile.Close()
 
-	// Execute FFmpeg command
-	cmd := exec.Command("ffmpeg", "-f", "concat", "-safe", "0", "-i", tempFile.Name(), "-c", "copy", outputFile)
-	output, err := cmd.CombinedOutput() // CombinedOutput gets stdout and stderr
-	if err != nil {
-		return "", fmt.Errorf("ffmpeg execution failed: %s\n%s", err, string(output))
-	}
+    // Execute FFmpeg command
+    cmd := exec.Command("ffmpeg", "-f", "concat", "-safe", "0", "-i", tempFile.Name(), "-c", "copy", outputFile)
+    output, err := cmd.CombinedOutput() // CombinedOutput gets stdout and stderr
+    if err != nil {
+        return "", fmt.Errorf("ffmpeg execution failed: %s\n%s", err, string(output))
+    }
 
-	return fmt.Sprintf("Successfully merged videos to %s", outputFile), nil
+    return fmt.Sprintf("Successfully merged videos to %s", outputFile), nil
 }
+

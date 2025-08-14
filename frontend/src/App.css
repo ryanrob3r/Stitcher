@@ -1,8 +1,20 @@
 /* General Styles */
+:root {
+    --primary-bg: #1b2636;
+    --secondary-bg: #2b3a4f;
+    --primary-text: #f0f0f0;
+    --secondary-text: #a0a0a0;
+    --accent-color: #3498db;
+    --accent-hover: #2980b9;
+    --destructive-color: #e74c3c;
+    --destructive-hover: #c0392b;
+    --font-family: 'Nunito', sans-serif;
+}
+
 #App {
-    font-family: 'Nunito', sans-serif;
-    background-color: #1b2636;
-    color: #f0f0f0;
+    font-family: var(--font-family);
+    background-color: var(--primary-bg);
+    color: var(--primary-text);
     text-align: center;
     padding: 1rem;
     min-height: 100vh;
@@ -16,18 +28,18 @@
     width: 100%;
     max-width: 900px;
     padding: 20px;
-    background-color: #2b3a4f;
+    background-color: var(--secondary-bg);
     border-radius: 8px;
     box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
 }
 
 h2 {
-    color: #3498db;
+    color: var(--accent-color);
     margin-bottom: 10px;
 }
 
 p {
-    color: #a0a0a0;
+    color: var(--secondary-text);
     margin-bottom: 20px;
 }
 
@@ -41,7 +53,7 @@ p {
 }
 
 .btn {
-    background-color: #3498db;
+    background-color: var(--accent-color);
     color: white;
     border: none;
     padding: 10px 20px;
@@ -52,7 +64,7 @@ p {
 }
 
 .btn:hover:not(:disabled) {
-    background-color: #2980b9;
+    background-color: var(--accent-hover);
 }
 
 .btn:disabled {
@@ -84,7 +96,7 @@ p {
 
 /* Status and Progress */
 .status-message {
-    color: #e74c3c;
+    color: var(--destructive-color);
     margin-bottom: 15px;
     min-height: 20px; /* Reserve space to prevent layout shifts */
 }
@@ -115,49 +127,99 @@ p {
 }
 
 .video-list h3 {
-    color: #3498db;
+    color: var(--accent-color);
     margin-bottom: 15px;
 }
 
 .video-item {
     display: flex;
     align-items: center;
-    background-color: #3a4a5f;
+    background-color: var(--secondary-bg);
     border: 1px solid #444;
-    border-radius: 5px;
+    border-radius: 8px;
     margin-bottom: 10px;
     padding: 10px;
     transition: background-color 0.2s ease-in-out;
     position: relative; /* For drag handle positioning */
+    gap: 15px; /* Space between thumbnail and info */
 }
 
 .video-item:hover {
     background-color: #4a5a6f;
 }
 
+/* Thumbnail Container */
+.video-thumbnail-container {
+    flex-shrink: 0;
+    width: 240px; /* Fixed width for thumbnail on larger screens */
+    height: 135px; /* Fixed height for 16:9 aspect ratio */
+    background-color: #333; /* Placeholder background */
+    border-radius: 4px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative; /* For image positioning */
+}
+
+.video-thumbnail {
+    width: 100%;
+    height: 100%;
+    object-fit: cover; /* Ensures image covers the area without distortion */
+    display: block;
+    border-radius: 4px;
+}
+
+.video-thumbnail-placeholder,
+.video-thumbnail-fallback {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #333;
+    color: #888;
+    border-radius: 4px;
+}
+
+.fallback-icon {
+    width: 60px;
+    height: 60px;
+    color: #666;
+}
+
+/* Video Info Section */
 .video-item-info {
     flex-grow: 1;
     display: flex;
     flex-direction: column;
-    margin-left: 10px;
+    text-align: start; /* Align text to start for LTR/RTL */
+    /* margin-left: 10px; Handled by gap */
 }
 
-.video-item-info strong {
-    color: #f0f0f0;
+.video-filename {
+    color: var(--primary-text);
     font-size: 1.1rem;
+    font-weight: bold;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis; /* Truncate long file names */
+    margin-bottom: 5px;
 }
 
-.video-item-info span {
-    color: #a0a0a0;
+.video-metadata {
+    color: var(--secondary-text);
     font-size: 0.9rem;
+    margin-bottom: 3px;
 }
 
 /* Drag and Drop Styles */
 .drag-handle {
     cursor: grab;
     font-size: 1.5rem;
-    color: #a0a0a0;
+    color: var(--secondary-text);
     padding: 0 10px;
+    flex-shrink: 0; /* Prevent handle from shrinking */
 }
 
 .drag-handle:active {
@@ -165,9 +227,67 @@ p {
 }
 
 .video-item-drag-overlay {
-    background-color: #3a4a5f;
-    border: 1px dashed #3498db;
-    border-radius: 5px;
+    background-color: var(--secondary-bg);
+    border: 1px dashed var(--accent-color);
+    border-radius: 8px;
     padding: 10px;
     opacity: 0.8;
+    display: flex;
+    align-items: center;
+    gap: 15px;
+}
+
+/* Responsive Layout */
+@media (max-width: 1023px) {
+    .video-item {
+        flex-direction: column; /* Stack vertically */
+        align-items: flex-start; /* Align items to start when stacked */
+    }
+
+    .video-thumbnail-container {
+        width: 100%; /* Full width when stacked */
+        height: auto; /* Allow height to adjust based on aspect ratio */
+        padding-bottom: 56.25%; /* Maintain 16:9 aspect ratio */
+        margin-bottom: 10px; /* Space below thumbnail when stacked */
+    }
+
+    .video-thumbnail {
+        position: absolute;
+        top: 0;
+        left: 0;
+    }
+
+    .drag-handle {
+        align-self: flex-end; /* Move drag handle to top right when stacked */
+        margin-top: -5px; /* Adjust position */
+        margin-right: -5px;
+    }
+
+    .video-item-info {
+        width: 100%;
+    }
+}
+
+/* RTL Support (using logical properties where possible) */
+[dir="rtl"] .video-item {
+    flex-direction: row-reverse; /* Reverse order for RTL */
+}
+
+[dir="rtl"] .drag-handle {
+    /* If drag handle is on the right in LTR, it moves to left in RTL */
+    /* No specific change needed if it's always at the start/end of flex line */
+}
+
+[dir="rtl"] .video-item-info {
+    text-align: end;
+}
+
+@media (max-width: 1023px) {
+    [dir="rtl"] .video-item {
+        flex-direction: column; /* Stacking remains column */
+    }
+
+    [dir="rtl"] .drag-handle {
+        align-self: flex-end; /* Stays at flex-end */
+    }
 }

@@ -46,15 +46,43 @@ function VideoItem({file}: VideoItemProps) {
         transition,
     };
 
+    const thumbnailUrl = file.thumbnailBase64 || '';
+    const hasThumbnail = !!thumbnailUrl;
+
     return (
-        <div ref={setNodeRef} style={style} {...attributes} className="video-item">
-            <div className="drag-handle" {...listeners}>&#x2261;</div> {/* Drag handle icon */}
-            <div className="video-item-info">
-                <strong>{file.fileName}</strong>
-                <span>Duration: {file.duration.toFixed(2)}s</span>
-                <span>Resolution: {file.resolution}</span>
-                <span>Codec: {file.codec}</span>
-                <span>Size: {formatBytes(file.size)}</span>
+        <div ref={setNodeRef} style={style} {...attributes} className="video-item" role="listitem">
+            <div className="drag-handle" {...listeners} aria-label="Drag to reorder video">&#x2261;</div>
+            
+            <figure className="video-thumbnail-container" aria-hidden="true">
+                {hasThumbnail ? (
+                    <img 
+                        src={thumbnailUrl} 
+                        alt={`Thumbnail for ${file.fileName}`} 
+                        className="video-thumbnail"
+                        width="240" 
+                        height="135" 
+                        loading="lazy"
+                        onError={(e) => {
+                            e.currentTarget.onerror = null; // Prevent infinite loop
+                            e.currentTarget.src = '/path/to/fallback-video-icon.svg'; // Fallback icon
+                            e.currentTarget.classList.add('video-thumbnail-fallback');
+                        }}
+                    />
+                ) : (
+                    <div className="video-thumbnail-placeholder" aria-label="Loading video thumbnail or no thumbnail available">
+                        <svg className="fallback-icon" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M4 4H20C21.1 4 22 4.9 22 6V18C22 19.1 21.1 20 20 20H4C2.9 20 2 19.1 2 18V6C2 4.9 2.9 4 4 4ZM20 18V6H4V18H20ZM9.5 12L16 16V8L9.5 12Z"/>
+                        </svg>
+                    </div>
+                )}
+            </figure>
+
+            <div className="video-info" dir="ltr"> {/* dir=ltr for consistent text direction */}
+                <strong className="video-filename" title={file.fileName}>{file.fileName}</strong>
+                <span className="video-metadata">Duration: {file.duration.toFixed(2)}s</span>
+                <span className="video-metadata">Resolution: {file.resolution}</span>
+                <span className="video-metadata">Codec: {file.codec}</span>
+                <span className="video-metadata">Size: {formatBytes(file.size)}</span>
             </div>
         </div>
     );
