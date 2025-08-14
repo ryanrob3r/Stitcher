@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio" // Added for reading ffmpeg stderr
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings" // Added for string manipulation
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -57,6 +59,7 @@ type MergeJob struct {
 // App struct
 type App struct {
 	ctx context.Context
+	cancelFunc context.CancelFunc
 }
 
 // NewApp creates a new App application struct
@@ -175,7 +178,7 @@ func (a *App) SelectVideos() ([]VideoFile, error) {
 func (a *App) GenerateThumbnail(videoPath string) (string, error) {
 	// Use ffmpeg to extract a frame at 1 second mark and output as base64
 	cmd := exec.Command("ffmpeg", "-i", videoPath, "-ss", "00:00:01.000", "-vframes", "1", "-f", "image2pipe", "-")
-	
+
 	var out bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &out
@@ -197,58 +200,109 @@ func (a *App) GetPresets() []MergePreset {
 		{Name: "MP4 (H.264) - High Quality", Format: "mp4", Quality: 18},
 		{Name: "MP4 (H.264) - Medium Quality", Format: "mp4", Quality: 23},
 		{Name: "WebM (VP9) - Medium Quality", Format: "webm", Quality: 28},
-    }
+	}
+}
+
+// CancelMerge cancels the ongoing video merge operation.
+func (a *App) CancelMerge() {
+	if a.cancelFunc != nil {
+		a.cancelFunc()
+		a.cancelFunc = nil                          // Clear the cancel function after use
+		runtime.EventsEmit(a.ctx, "mergeCancelled") // Emit an event to the frontend
+	}
 }
 
 // MergeVideos takes a list of video files and merges them into a single output file.
 func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
-    if len(videoFiles) < 2 {
-        return "", fmt.Errorf("at least two videos are required to merge")
-    }
+	if len(videoFiles) < 2 {
+		return "", fmt.Errorf("at least two videos are required to merge")
+	}
 
-    // Compatibility Check
-    firstVideo := videoFiles[0]
-    for _, video := range videoFiles[1:] {
-        if video.Resolution != firstVideo.Resolution || video.Codec != firstVideo.Codec {
-            return "", fmt.Errorf("incompatible videos: all videos must have the same resolution and codec for a fast merge. Mismatched file: %s", video.FileName)
-        }
-    }
+	// Compatibility Check
+	firstVideo := videoFiles[0]
+	for _, video := range videoFiles[1:] {
+		if video.Resolution != firstVideo.Resolution || video.Codec != firstVideo.Codec {
+			return "", fmt.Errorf("incompatible videos: all videos must have the same resolution and codec for a fast merge. Mismatched file: %s", video.FileName)
+		}
+	}
 
-    // Ask user for save location
-    ext := filepath.Ext(firstVideo.Path)
-    outputFile, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
-        Title:           "Save Merged Video As...",
-        DefaultFilename: fmt.Sprintf("merged-video%s", ext),
-    })
-    if err != nil {
-        return "", err
-    }
-    if outputFile == "" {
-        return "", fmt.Errorf("save operation cancelled")
-    }
+	// Ask user for save location
+	ext := filepath.Ext(firstVideo.Path)
+	outputFile, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Save Merged Video As...",
+		DefaultFilename: fmt.Sprintf("merged-video%s", ext),
+	})
+	if err != nil {
+		return "", err
+	}
+	if outputFile == "" {
+		return "", fmt.Errorf("save operation cancelled")
+	}
 
-    // Create a temporary file to list the inputs for ffmpeg
-    tempFile, err := os.CreateTemp("", "ffmpeg-list-*.txt")
-    if err != nil {
-        return "", fmt.Errorf("failed to create temp file for ffmpeg: %w", err)
-    }
-    defer os.Remove(tempFile.Name()) // Clean up the temp file
+	// Create a temporary file to list the inputs for ffmpeg
+	tempFile, err := os.CreateTemp("", "ffmpeg-list-*.txt")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file for ffmpeg: %w", err)
+	}
+	defer os.Remove(tempFile.Name()) // Clean up the temp file
 
-    for _, video := range videoFiles {
-        // FFmpeg's concat demuxer requires file paths to be quoted if they contain special characters.
-        if _, err := tempFile.WriteString(fmt.Sprintf("file '%s'\n", video.Path)); err != nil {
-            return "", fmt.Errorf("failed to write to temp file: %w", err)
-        }
-    }
-    tempFile.Close()
+	for _, video := range videoFiles {
+		// FFmpeg's concat demuxer requires file paths to be quoted if they contain special characters.
+		if _, err := tempFile.WriteString(fmt.Sprintf("file '%s'\n", video.Path)); err != nil {
+			return "", fmt.Errorf("failed to write to temp file: %w", err)
+		}
+	}
+	tempFile.Close()
 
-    // Execute FFmpeg command
-    cmd := exec.Command("ffmpeg", "-f", "concat", "-safe", "0", "-i", tempFile.Name(), "-c", "copy", outputFile)
-    output, err := cmd.CombinedOutput() // CombinedOutput gets stdout and stderr
-    if err != nil {
-        return "", fmt.Errorf("ffmpeg execution failed: %s\n%s", err, string(output))
-    }
+	// Create a context with cancellation for the ffmpeg command
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.cancelFunc = cancel // Store the cancel function
+	defer func() {        // Ensure cancel is called when function exits
+		cancel()
+		a.cancelFunc = nil
+	}()
 
-    return fmt.Sprintf("Successfully merged videos to %s", outputFile), nil
+	// Execute FFmpeg command
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-f", "concat", "-safe", "0", "-i", tempFile.Name(), "-c", "copy", outputFile)
+
+	// Capture stderr for progress monitoring
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("failed to start ffmpeg command: %w", err)
+	}
+
+	// Goroutine to read and parse ffmpeg progress
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			line := scanner.Text()
+			// Parse the line for progress information
+			// This is a simplified example, actual parsing will be more complex
+			if strings.Contains(line, "frame=") && strings.Contains(line, "time=") {
+				// Extract time or frame and calculate percentage
+				// For now, just emit the raw line as progress
+				runtime.EventsEmit(a.ctx, "mergeProgress", line)
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			log.Printf("Error reading ffmpeg stderr: %v", err)
+		}
+	}()
+
+	// Wait for the command to finish
+	err = cmd.Wait()
+	if err != nil {
+		// Check if the error was due to cancellation
+		if ctx.Err() == context.Canceled {
+			return "", fmt.Errorf("merge cancelled by user")
+		}
+		return "", fmt.Errorf("ffmpeg execution failed: %w", err)
+	}
+
+	return fmt.Sprintf("Successfully merged videos to %s", outputFile), nil
 }
-

@@ -101,6 +101,19 @@ p {
     min-height: 20px; /* Reserve space to prevent layout shifts */
 }
 
+.progress-section {
+    margin-top: 20px;
+    padding: 15px;
+    background-color: var(--secondary-bg);
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.progress-section h3 {
+    color: var(--accent-color);
+    margin-bottom: 10px;
+}
+
 .progress-bar-container {
     width: 100%;
     background-color: #444;
@@ -118,6 +131,34 @@ p {
     line-height: 20px;
     color: white;
     transition: width 0.3s ease-in-out;
+}
+
+.progress-text {
+    color: var(--primary-text);
+    margin-top: 10px;
+    font-weight: bold;
+}
+
+.merge-log {
+    background-color: #1a1a1a;
+    color: #00ff00; /* Green text for log */
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.8rem;
+    text-align: left;
+    padding: 10px;
+    border-radius: 5px;
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap; /* Preserve whitespace and wrap text */
+    margin-top: 15px;
+}
+
+.cancel-btn {
+    background-color: var(--destructive-color);
+}
+
+.cancel-btn:hover:not(:disabled) {
+    background-color: var(--destructive-hover);
 }
 
 /* Video List */

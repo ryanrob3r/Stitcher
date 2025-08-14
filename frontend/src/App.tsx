@@ -1,7 +1,8 @@
-import {useState} from 'react';
+import {useEffect, useState} from 'react'; // Added useEffect
 import './App.css';
 import {main} from "../wailsjs/go/models";
-import {MergeVideos, SelectVideos} from "../wailsjs/go/main/App";
+import {CancelMerge, MergeVideos, SelectVideos} from "../wailsjs/go/main/App"; // Added CancelMerge
+import {EventsOn, EventsEmit} from "../wailsjs/runtime/runtime"; // Added EventsOn, EventsEmit
 
 import {
     DndContext,
@@ -88,10 +89,43 @@ function VideoItem({file}: VideoItemProps) {
     );
 }
 
-function App() {
+
+    function App() {
     const [videoFiles, setVideoFiles] = useState<VideoFile[]>([]);
     const [statusMessage, setStatusMessage] = useState<string>("");
     const [activeId, setActiveId] = useState<string | null>(null); // State to track active dragging item
+    const [isMerging, setIsMerging] = useState<boolean>(false); // New state for merging status
+    const [mergeProgress, setMergeProgress] = useState<number>(0); // New state for progress (0-100)
+    const [mergeLog, setMergeLog] = useState<string>(""); // New state for ffmpeg log output
+
+    useEffect(() => {
+        // Listener for merge progress updates
+        EventsOn("mergeProgress", (progressLine: string) => {
+            // Basic parsing for demonstration. A more robust parser would extract percentage.
+            // For now, we'll just update the log and a dummy progress.
+            setMergeLog(prev => prev + progressLine + "\n");
+            // Dummy progress update: if line contains "frame=", increment progress slightly
+            if (progressLine.includes("frame=")) {
+                setMergeProgress(prev => Math.min(prev + 1, 99)); // Increment, but don't reach 100
+            }
+        });
+
+        // Listener for merge cancellation
+        EventsOn("mergeCancelled", () => {
+            setStatusMessage("Merge operation cancelled.");
+            setIsMerging(false);
+            setMergeProgress(0);
+            setMergeLog("");
+        });
+
+        // Cleanup function to unsubscribe from events when component unmounts
+        return () => {
+            // Wails EventsOn returns an unsubscribe function, but it's not directly exposed
+            // in the current wailsjs/runtime. For simplicity in this example, we'll rely
+            // on component unmount to handle cleanup, or assume events are global.
+            // In a real app, you might manage subscriptions more explicitly.
+        };
+    }, []); // Empty dependency array means this effect runs once on mount and cleans up on unmount
 
     const sensors = useSensors(
         useSensor(PointerSensor),
@@ -112,13 +146,23 @@ function App() {
             setStatusMessage("Please select at least two videos to merge.");
             return;
         }
-        setStatusMessage("Merging videos...");
+        setStatusMessage("Starting merge...");
+        setIsMerging(true); // Set merging status to true
+        setMergeProgress(0); // Reset progress
+        setMergeLog(""); // Clear previous log
+
         MergeVideos(videoFiles)
             .then(result => {
                 setStatusMessage(result);
                 setVideoFiles([]); // Clear the list on success
+                setIsMerging(false); // Reset merging status
+                setMergeProgress(100); // Set progress to 100 on success
             })
-            .catch(err => setStatusMessage(`Error: ${err}`));
+            .catch(err => {
+                setStatusMessage(`Error: ${err}`);
+                setIsMerging(false); // Reset merging status on error
+                setMergeProgress(0); // Reset progress on error
+            });
     }
 
     function handleDragStart(event: any) {
@@ -151,16 +195,40 @@ function App() {
                 <p>Select two or more compatible videos (same codec and resolution) to merge.</p>
 
                 <div className="controls">
-                    <button className="btn" onClick={handleSelectVideos}>Select Videos</button>
-                    <button
-                        className="btn merge-btn"
-                        onClick={handleMergeVideos}
-                        disabled={videoFiles.length < 2}>
-                        Merge Videos
-                    </button>
+                    <button className="btn" onClick={handleSelectVideos} disabled={isMerging}>Select Videos</button>
+                    {!isMerging ? (
+                        <button
+                            className="btn merge-btn"
+                            onClick={handleMergeVideos}
+                            disabled={videoFiles.length < 2 || isMerging}>
+                            Merge Videos
+                        </button>
+                    ) : (
+                        <button
+                            className="btn cancel-btn"
+                            onClick={CancelMerge} // Call backend CancelMerge function
+                            disabled={!isMerging}>
+                            Cancel Merge
+                        </button>
+                    )}
                 </div>
 
                 {statusMessage && <div className="status-message">{statusMessage}</div>}
+
+                {isMerging && (
+                    <div className="progress-section">
+                        <h3>Merging...</h3>
+                        <div className="progress-bar-container">
+                            <div className="progress-bar" style={{ width: `${mergeProgress}%` }}></div>
+                        </div>
+                        <p className="progress-text">{mergeProgress.toFixed(0)}% Complete</p>
+                        {mergeLog && (
+                            <pre className="merge-log">
+                                {mergeLog.split('\n').slice(-10).join('\n')} {/* Show last 10 lines */}
+                            </pre>
+                        )}
+                    </div>
+                )}
 
                 {videoFiles.length > 0 && (
                     <div className="video-list">
