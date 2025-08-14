@@ -1,3 +1,4 @@
-build/bin
+build/bin   
 node_modules
 frontend/dist
+ROADMAP.md

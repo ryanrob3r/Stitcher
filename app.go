@@ -68,6 +68,15 @@ func NewApp() *App {
 // so we can call the runtime methods
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+	_, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		runtime.MessageDialog(a.ctx, runtime.MessageDialogOptions{
+			Type:    runtime.ErrorDialog,
+			Title:   "Error: FFmpeg not found",
+			Message: "FFmpeg is required for this application to function. Please install it and ensure it is in your system's PATH.\n\nFor installation instructions, please visit: https://ffmpeg.org/download.html",
+		})
+		os.Exit(1)
+	}
 }
 
 // FFProbeStream defines the structure for a stream in ffprobe output
