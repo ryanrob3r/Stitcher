@@ -218,7 +218,7 @@ function App() {
     return (
         <div id="App">
             <div className="container">
-                <h2>Stitcher - Batch Video Merger</h2>
+                <h2>Batch Video Merger</h2>
                 <p>Select two or more compatible videos to merge. Incompatible resolutions can be re-encoded.</p>
 
                 <div className="controls">
