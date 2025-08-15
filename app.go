@@ -102,7 +102,8 @@ type FFProbeResult struct {
 	Format  FFProbeFormat   `json:"format"`
 }
 
-// SelectVideos opens a file dialog and returns metadata for selected video files
+// SelectVideos opens a file dialog and returns a list of video files with basic info.
+// Detailed metadata is fetched separately.
 func (a *App) SelectVideos() ([]VideoFile, error) {
 	filePaths, err := runtime.OpenMultipleFilesDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select Video Files",
@@ -122,56 +123,62 @@ func (a *App) SelectVideos() ([]VideoFile, error) {
 	}
 
 	var videoFiles []VideoFile
-
 	for _, path := range filePaths {
-		cmd := exec.Command("ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path)
-		out, err := cmd.Output()
-		if err != nil {
-			log.Printf("Error running ffprobe for %s: %v", path, err)
-			continue // Skip this file
-		}
-
-		var ffprobeData FFProbeResult
-		err = json.Unmarshal(out, &ffprobeData)
-		if err != nil {
-			log.Printf("Error parsing ffprobe output for %s: %v", path, err)
-			continue // Skip this file
-		}
-
-		var videoStream FFProbeStream
-		for _, stream := range ffprobeData.Streams {
-			if stream.CodecType == "video" {
-				videoStream = stream
-				break
-			}
-		}
-
-		duration, _ := strconv.ParseFloat(ffprobeData.Format.Duration, 64)
-		size, _ := strconv.ParseInt(ffprobeData.Format.Size, 10, 64)
-
-		videoFile := VideoFile{
-			Path:       path,
-			FileName:   filepath.Base(path),
-			Size:       size,
-			Duration:   duration,
-			Resolution: fmt.Sprintf("%dx%d", videoStream.Width, videoStream.Height),
-			Codec:      videoStream.CodecName,
-		}
-
-		// Generate thumbnail
-		thumbnail, err := a.GenerateThumbnail(path)
-		if err != nil {
-			log.Printf("Error generating thumbnail for %s: %v", path, err)
-			// Continue without thumbnail, or set a default fallback
-			videoFile.ThumbnailBase64 = ""
-		} else {
-			videoFile.ThumbnailBase64 = thumbnail
-		}
-
-		videoFiles = append(videoFiles, videoFile)
+		videoFiles = append(videoFiles, VideoFile{
+			Path:     path,
+			FileName: filepath.Base(path),
+		})
 	}
 
 	return videoFiles, nil
+}
+
+// GetVideoMetadata fetches detailed information for a single video file.
+func (a *App) GetVideoMetadata(path string) (VideoFile, error) {
+	cmd := exec.Command("ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path)
+	out, err := cmd.Output()
+	if err != nil {
+		log.Printf("Error running ffprobe for %s: %v", path, err)
+		return VideoFile{}, fmt.Errorf("failed to run ffprobe for %s", path)
+	}
+
+	var ffprobeData FFProbeResult
+	err = json.Unmarshal(out, &ffprobeData)
+	if err != nil {
+		log.Printf("Error parsing ffprobe output for %s: %v", path, err)
+		return VideoFile{}, fmt.Errorf("failed to parse ffprobe data for %s", path)
+	}
+
+	var videoStream FFProbeStream
+	for _, stream := range ffprobeData.Streams {
+		if stream.CodecType == "video" {
+			videoStream = stream
+			break
+		}
+	}
+
+	duration, _ := strconv.ParseFloat(ffprobeData.Format.Duration, 64)
+	size, _ := strconv.ParseInt(ffprobeData.Format.Size, 10, 64)
+
+	videoFile := VideoFile{
+		Path:       path,
+		FileName:   filepath.Base(path),
+		Size:       size,
+		Duration:   duration,
+		Resolution: fmt.Sprintf("%dx%d", videoStream.Width, videoStream.Height),
+		Codec:      videoStream.CodecName,
+	}
+
+	// Generate thumbnail
+	thumbnail, err := a.GenerateThumbnail(path)
+	if err != nil {
+		log.Printf("Error generating thumbnail for %s: %v", path, err)
+		videoFile.ThumbnailBase64 = "" // Continue without thumbnail
+	} else {
+		videoFile.ThumbnailBase64 = thumbnail
+	}
+
+	return videoFile, nil
 }
 
 // GenerateThumbnail generates a base64 encoded thumbnail for a given video path.
@@ -212,22 +219,139 @@ func (a *App) CancelMerge() {
 	}
 }
 
+// handleIncompatibleVideos checks for codec and resolution mismatches and handles re-encoding.
+// It returns a new list of video files (if re-encoding was needed) and a temporary directory path to be cleaned up.
+func (a *App) handleIncompatibleVideos(videoFiles []VideoFile) ([]VideoFile, string, error) {
+	if len(videoFiles) == 0 {
+		return nil, "", fmt.Errorf("no video files provided")
+	}
+
+	firstVideo := videoFiles[0]
+	codecMismatch := false
+	resolutionMismatch := false
+	highestWidth := 0
+	highestHeight := 0
+
+	// First pass: check for mismatches and find the highest resolution
+	for _, video := range videoFiles {
+		if video.Codec != firstVideo.Codec {
+			codecMismatch = true
+			break
+		}
+		if video.Resolution != firstVideo.Resolution {
+			resolutionMismatch = true
+		}
+
+		// Parse resolution to find the highest for the re-encoding target
+		var w, h int
+		fmt.Sscanf(video.Resolution, "%dx%d", &w, &h)
+		if w > highestWidth {
+			highestWidth = w
+			highestHeight = h
+		}
+	}
+
+	// Handle codec mismatch: this is a hard stop
+	if codecMismatch {
+		runtime.MessageDialog(a.ctx, runtime.MessageDialogOptions{
+			Type:    runtime.ErrorDialog,
+			Title:   "Codec Mismatch",
+			Message: fmt.Sprintf("All videos must have the same codec. The first video uses '%s', but at least one other video uses a different codec.", firstVideo.Codec),
+		})
+		return nil, "", fmt.Errorf("codec mismatch")
+	}
+
+	// If no resolution mismatch, we can proceed with a fast merge
+	if !resolutionMismatch {
+		return videoFiles, "", nil
+	}
+
+	// Handle resolution mismatch: ask the user if they want to re-encode
+	targetResolution := fmt.Sprintf("%dx%d", highestWidth, highestHeight)
+	dialogResult, err := runtime.MessageDialog(a.ctx, runtime.MessageDialogOptions{
+		Type:    runtime.QuestionDialog,
+		Title:   "Resolution Mismatch",
+		Message: fmt.Sprintf("The selected videos have different resolutions. Do you want to re-encode them all to the highest resolution (%s) to proceed with the merge?", targetResolution),
+		Buttons: []string{"Yes", "No"},
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	if dialogResult == "No" {
+		return nil, "", fmt.Errorf("user cancelled re-encoding")
+	}
+
+	// --- Re-encoding process starts ---
+	runtime.EventsEmit(a.ctx, "mergeProgress", "Starting re-encoding process...")
+
+	// Create a temporary directory for the scaled files
+	tempDir, err := os.MkdirTemp("", "stitcher-scaled-*")
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create temp dir for scaling: %w", err)
+	}
+
+	processedFiles := make([]VideoFile, len(videoFiles))
+	for i, video := range videoFiles {
+		if video.Resolution == targetResolution {
+			// This video is already the correct resolution, just copy its data
+			processedFiles[i] = video
+			continue
+		}
+
+		// This video needs to be scaled
+		runtime.EventsEmit(a.ctx, "mergeProgress", fmt.Sprintf("Scaling %s...", video.FileName))
+		outputFileName := filepath.Join(tempDir, fmt.Sprintf("scaled-%d-%s", i, video.FileName))
+
+		cmd := exec.Command("ffmpeg",
+			"-i", video.Path,
+			"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2", targetResolution, targetResolution),
+			"-c:a", "copy",
+			outputFileName,
+		)
+
+		// Run the command and wait for it to finish
+		if err := cmd.Run(); err != nil {
+			// Attempt to clean up before failing
+			os.RemoveAll(tempDir)
+			return nil, "", fmt.Errorf("failed to scale video %s: %w", video.FileName, err)
+		}
+
+		// Create a new VideoFile entry for the scaled video
+		processedFiles[i] = VideoFile{
+			Path:       outputFileName,
+			FileName:   video.FileName, // Keep original name for reference
+			Resolution: targetResolution,
+			Codec:      video.Codec,
+			// Other fields like size, duration could be re-calculated, but path is the most critical one
+		}
+	}
+
+	runtime.EventsEmit(a.ctx, "mergeProgress", "Re-encoding complete. Starting final merge...")
+	return processedFiles, tempDir, nil
+}
+
+
 // MergeVideos takes a list of video files and merges them into a single output file.
 func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 	if len(videoFiles) < 2 {
 		return "", fmt.Errorf("at least two videos are required to merge")
 	}
 
-	// Compatibility Check
-	firstVideo := videoFiles[0]
-	for _, video := range videoFiles[1:] {
-		if video.Resolution != firstVideo.Resolution || video.Codec != firstVideo.Codec {
-			return "", fmt.Errorf("incompatible videos: all videos must have the same resolution and codec for a fast merge. Mismatched file: %s", video.FileName)
-		}
+	// Handle potential incompatibilities (re-encoding if necessary)
+	processedFiles, tempDir, err := a.handleIncompatibleVideos(videoFiles)
+	if err != nil {
+		return "", fmt.Errorf("failed to process videos: %w", err)
+	}
+	// If a temp directory was created, make sure it's cleaned up
+	if tempDir != "" {
+		defer os.RemoveAll(tempDir)
 	}
 
 	// Ask user for save location
-	ext := filepath.Ext(firstVideo.Path)
+	ext := filepath.Ext(processedFiles[0].Path)
+	if ext == "" { // If the scaled file has no extension, default to mp4
+		ext = ".mp4"
+	}
 	outputFile, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
 		Title:           "Save Merged Video As...",
 		DefaultFilename: fmt.Sprintf("merged-video%s", ext),
@@ -246,7 +370,7 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 	}
 	defer os.Remove(tempFile.Name()) // Clean up the temp file
 
-	for _, video := range videoFiles {
+	for _, video := range processedFiles {
 		// FFmpeg's concat demuxer requires file paths to be quoted if they contain special characters.
 		if _, err := tempFile.WriteString(fmt.Sprintf("file '%s'\n", video.Path)); err != nil {
 			return "", fmt.Errorf("failed to write to temp file: %w", err)
@@ -262,7 +386,7 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 		a.cancelFunc = nil
 	}()
 
-	// Execute FFmpeg command
+	// Execute FFmpeg command - always use -c copy because inputs are now compatible
 	cmd := exec.CommandContext(ctx, "ffmpeg", "-f", "concat", "-safe", "0", "-i", tempFile.Name(), "-c", "copy", outputFile)
 
 	// Capture stderr for progress monitoring
@@ -281,11 +405,8 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			line := scanner.Text()
-			// Parse the line for progress information
 			// This is a simplified example, actual parsing will be more complex
 			if strings.Contains(line, "frame=") && strings.Contains(line, "time=") {
-				// Extract time or frame and calculate percentage
-				// For now, just emit the raw line as progress
 				runtime.EventsEmit(a.ctx, "mergeProgress", line)
 			}
 		}

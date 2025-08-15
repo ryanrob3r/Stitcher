@@ -1,8 +1,8 @@
-import {useEffect, useState} from 'react'; // Added useEffect
+import {useEffect, useState} from 'react';
 import './App.css';
 import {main} from "../wailsjs/go/models";
-import {CancelMerge, MergeVideos, SelectVideos} from "../wailsjs/go/main/App"; // Added CancelMerge
-import {EventsOn, EventsEmit} from "../wailsjs/runtime/runtime"; // Added EventsOn, EventsEmit
+import {CancelMerge, GetVideoMetadata, MergeVideos, SelectVideos} from "../wailsjs/go/main/App";
+import {EventsOn} from "../wailsjs/runtime/runtime";
 
 import {
     DndContext,
@@ -22,8 +22,11 @@ import {
 } from '@dnd-kit/sortable';
 import {CSS} from '@dnd-kit/utilities';
 
-// Explicitly type VideoFile by referencing the imported Go models
-type VideoFile = main.VideoFile;
+// Extend the Go model type for frontend state management
+type VideoFile = main.VideoFile & {
+    status: 'loading' | 'loaded' | 'error';
+    error?: string;
+};
 
 // Helper to format bytes into something more readable
 function formatBytes(bytes: number, decimals = 2) {
@@ -47,38 +50,57 @@ function VideoItem({file}: VideoItemProps) {
         transition,
     };
 
+    if (file.status === 'loading') {
+        return (
+            <div ref={setNodeRef} style={style} {...attributes} className="video-item" role="listitem">
+                <div className="drag-handle" {...listeners} aria-label="Drag to reorder video">&#x2261;</div>
+                <div className="video-thumbnail-placeholder"></div>
+                <div className="video-info" dir="ltr">
+                    <strong className="video-filename" title={file.fileName}>{file.fileName}</strong>
+                    <span className="video-metadata">Loading details...</span>
+                </div>
+            </div>
+        );
+    }
+
+    if (file.status === 'error') {
+        return (
+            <div ref={setNodeRef} style={style} {...attributes} className="video-item video-item-error" role="listitem">
+                <div className="drag-handle" {...listeners} aria-label="Drag to reorder video">&#x2261;</div>
+                <div className="video-thumbnail-placeholder"></div>
+                <div className="video-info" dir="ltr">
+                    <strong className="video-filename" title={file.fileName}>{file.fileName}</strong>
+                    <span className="video-metadata error-text">Error: {file.error || 'Failed to load metadata.'}</span>
+                </div>
+            </div>
+        );
+    }
+
     const thumbnailUrl = file.thumbnailBase64 || '';
     const hasThumbnail = !!thumbnailUrl;
 
     return (
         <div ref={setNodeRef} style={style} {...attributes} className="video-item" role="listitem">
             <div className="drag-handle" {...listeners} aria-label="Drag to reorder video">&#x2261;</div>
-            
             <figure className="video-thumbnail-container" aria-hidden="true">
                 {hasThumbnail ? (
-                    <img 
-                        src={thumbnailUrl} 
-                        alt={`Thumbnail for ${file.fileName}`} 
+                    <img
+                        src={thumbnailUrl}
+                        alt={`Thumbnail for ${file.fileName}`}
                         className="video-thumbnail"
-                        width="240" 
-                        height="135" 
+                        width="240"
+                        height="135"
                         loading="lazy"
-                        onError={(e) => {
-                            e.currentTarget.onerror = null; // Prevent infinite loop
-                            e.currentTarget.src = '/path/to/fallback-video-icon.svg'; // Fallback icon
-                            e.currentTarget.classList.add('video-thumbnail-fallback');
-                        }}
                     />
                 ) : (
-                    <div className="video-thumbnail-placeholder" aria-label="Loading video thumbnail or no thumbnail available">
+                    <div className="video-thumbnail-placeholder" aria-label="No thumbnail available">
                         <svg className="fallback-icon" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
                             <path d="M4 4H20C21.1 4 22 4.9 22 6V18C22 19.1 21.1 20 20 20H4C2.9 20 2 19.1 2 18V6C2 4.9 2.9 4 4 4ZM20 18V6H4V18H20ZM9.5 12L16 16V8L9.5 12Z"/>
                         </svg>
                     </div>
                 )}
             </figure>
-
-            <div className="video-info" dir="ltr"> {/* dir=ltr for consistent text direction */}
+            <div className="video-info" dir="ltr">
                 <strong className="video-filename" title={file.fileName}>{file.fileName}</strong>
                 <span className="video-metadata">Duration: {file.duration.toFixed(2)}s</span>
                 <span className="video-metadata">Resolution: {file.resolution}</span>
@@ -89,79 +111,85 @@ function VideoItem({file}: VideoItemProps) {
     );
 }
 
-
-    function App() {
+function App() {
     const [videoFiles, setVideoFiles] = useState<VideoFile[]>([]);
     const [statusMessage, setStatusMessage] = useState<string>("");
-    const [activeId, setActiveId] = useState<string | null>(null); // State to track active dragging item
-    const [isMerging, setIsMerging] = useState<boolean>(false); // New state for merging status
-    const [mergeProgress, setMergeProgress] = useState<number>(0); // New state for progress (0-100)
-    const [mergeLog, setMergeLog] = useState<string>(""); // New state for ffmpeg log output
+    const [activeId, setActiveId] = useState<string | null>(null);
+    const [isMerging, setIsMerging] = useState<boolean>(false);
+    const [mergeProgress, setMergeProgress] = useState<number>(0);
+    const [mergeLog, setMergeLog] = useState<string>("");
 
     useEffect(() => {
-        // Listener for merge progress updates
         EventsOn("mergeProgress", (progressLine: string) => {
-            // Basic parsing for demonstration. A more robust parser would extract percentage.
-            // For now, we'll just update the log and a dummy progress.
             setMergeLog(prev => prev + progressLine + "\n");
-            // Dummy progress update: if line contains "frame=", increment progress slightly
             if (progressLine.includes("frame=")) {
-                setMergeProgress(prev => Math.min(prev + 1, 99)); // Increment, but don't reach 100
+                setMergeProgress(prev => Math.min(prev + 1, 99));
             }
         });
 
-        // Listener for merge cancellation
         EventsOn("mergeCancelled", () => {
             setStatusMessage("Merge operation cancelled.");
             setIsMerging(false);
             setMergeProgress(0);
             setMergeLog("");
         });
-
-        // Cleanup function to unsubscribe from events when component unmounts
-        return () => {
-            // Wails EventsOn returns an unsubscribe function, but it's not directly exposed
-            // in the current wailsjs/runtime. For simplicity in this example, we'll rely
-            // on component unmount to handle cleanup, or assume events are global.
-            // In a real app, you might manage subscriptions more explicitly.
-        };
-    }, []); // Empty dependency array means this effect runs once on mount and cleans up on unmount
+    }, []);
 
     const sensors = useSensors(
         useSensor(PointerSensor),
-        useSensor(KeyboardSensor, {
-            coordinateGetter: sortableKeyboardCoordinates,
-        })
+        useSensor(KeyboardSensor, {coordinateGetter: sortableKeyboardCoordinates})
     );
 
-    function handleSelectVideos() {
+    async function handleSelectVideos() {
         setStatusMessage("");
-        SelectVideos()
-            .then(setVideoFiles)
-            .catch(err => setStatusMessage(`Error: ${err}`));
+        try {
+            const initialFiles = await SelectVideos();
+            if (initialFiles.length === 0) return;
+
+            const filesWithStatus: VideoFile[] = initialFiles.map(file => ({...file, status: 'loading'}));
+            setVideoFiles(filesWithStatus);
+
+            // Now, fetch metadata for each file
+            filesWithStatus.forEach(async (file) => {
+                try {
+                    const metadata = await GetVideoMetadata(file.path);
+                    setVideoFiles(currentFiles =>
+                        currentFiles.map(f => f.path === file.path ? {...metadata, status: 'loaded'} : f)
+                    );
+                } catch (err) {
+                    console.error(`Failed to get metadata for ${file.fileName}:`, err);
+                    setVideoFiles(currentFiles =>
+                        currentFiles.map(f => f.path === file.path ? {...f, status: 'error', error: String(err)} : f)
+                    );
+                }
+            });
+        } catch (err) {
+            setStatusMessage(`Error: ${err}`);
+        }
     }
 
     function handleMergeVideos() {
-        if (videoFiles.length < 2) {
-            setStatusMessage("Please select at least two videos to merge.");
+        const filesToMerge = videoFiles.filter(f => f.status === 'loaded');
+        if (filesToMerge.length < 2) {
+            setStatusMessage("Please select at least two loaded videos to merge.");
             return;
         }
         setStatusMessage("Starting merge...");
-        setIsMerging(true); // Set merging status to true
-        setMergeProgress(0); // Reset progress
-        setMergeLog(""); // Clear previous log
+        setIsMerging(true);
+        setMergeProgress(0);
+        setMergeLog("");
 
-        MergeVideos(videoFiles)
+        MergeVideos(filesToMerge)
             .then(result => {
                 setStatusMessage(result);
-                setVideoFiles([]); // Clear the list on success
-                setIsMerging(false); // Reset merging status
-                setMergeProgress(100); // Set progress to 100 on success
+                setVideoFiles([]);
+                setIsMerging(false);
+                setMergeProgress(100);
             })
             .catch(err => {
                 setStatusMessage(`Error: ${err}`);
-                setIsMerging(false); // Reset merging status on error
-                setMergeProgress(0); // Reset progress on error
+                setIsMerging(false);
+                setMergeProgress(0);
             });
     }
 
@@ -171,7 +199,6 @@ function VideoItem({file}: VideoItemProps) {
 
     function handleDragEnd(event: any) {
         const {active, over} = event;
-
         if (active.id !== over.id) {
             setVideoFiles((items) => {
                 const oldIndex = items.findIndex(item => item.path === active.id);
@@ -192,7 +219,7 @@ function VideoItem({file}: VideoItemProps) {
         <div id="App">
             <div className="container">
                 <h2>Stitcher - Batch Video Merger</h2>
-                <p>Select two or more compatible videos (same codec and resolution) to merge.</p>
+                <p>Select two or more compatible videos to merge. Incompatible resolutions can be re-encoded.</p>
 
                 <div className="controls">
                     <button className="btn" onClick={handleSelectVideos} disabled={isMerging}>Select Videos</button>
@@ -200,13 +227,13 @@ function VideoItem({file}: VideoItemProps) {
                         <button
                             className="btn merge-btn"
                             onClick={handleMergeVideos}
-                            disabled={videoFiles.length < 2 || isMerging}>
+                            disabled={videoFiles.length < 2 || isMerging || videoFiles.some(f => f.status !== 'loaded')}>
                             Merge Videos
                         </button>
                     ) : (
                         <button
                             className="btn cancel-btn"
-                            onClick={CancelMerge} // Call backend CancelMerge function
+                            onClick={CancelMerge}
                             disabled={!isMerging}>
                             Cancel Merge
                         </button>
@@ -219,12 +246,12 @@ function VideoItem({file}: VideoItemProps) {
                     <div className="progress-section">
                         <h3>Merging...</h3>
                         <div className="progress-bar-container">
-                            <div className="progress-bar" style={{ width: `${mergeProgress}%` }}></div>
+                            <div className="progress-bar" style={{width: `${mergeProgress}%`}}></div>
                         </div>
                         <p className="progress-text">{mergeProgress.toFixed(0)}% Complete</p>
                         {mergeLog && (
                             <pre className="merge-log">
-                                {mergeLog.split('\n').slice(-10).join('\n')} {/* Show last 10 lines */}
+                                {mergeLog.split('\n').slice(-10).join('\n')}
                             </pre>
                         )}
                     </div>
@@ -249,7 +276,7 @@ function VideoItem({file}: VideoItemProps) {
                                 ))}
                             </SortableContext>
                             <DragOverlay>
-                                {activeId && activeVideoFile ? (
+                                {activeId && activeVideoFile && activeVideoFile.status === 'loaded' ? (
                                     <div className="video-item-drag-overlay">
                                         <div className="video-item-info">
                                             <strong>{activeVideoFile.fileName}</strong>
@@ -270,3 +297,4 @@ function VideoItem({file}: VideoItemProps) {
 }
 
 export default App
+App

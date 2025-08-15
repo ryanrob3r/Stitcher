@@ -14,6 +14,10 @@ export function GetPresets() {
   return window['go']['main']['App']['GetPresets']();
 }
 
+export function GetVideoMetadata(arg1) {
+  return window['go']['main']['App']['GetVideoMetadata'](arg1);
+}
+
 export function MergeVideos(arg1) {
   return window['go']['main']['App']['MergeVideos'](arg1);
 }

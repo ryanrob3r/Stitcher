@@ -8,6 +8,8 @@ export function GenerateThumbnail(arg1:string):Promise<string>;
 
 export function GetPresets():Promise<Array<main.MergePreset>>;
 
+export function GetVideoMetadata(arg1:string):Promise<main.VideoFile>;
+
 export function MergeVideos(arg1:Array<main.VideoFile>):Promise<string>;
 
 export function SelectVideos():Promise<Array<main.VideoFile>>;
