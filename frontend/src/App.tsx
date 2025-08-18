@@ -117,13 +117,22 @@ function App() {
     const [activeId, setActiveId] = useState<string | null>(null);
     const [isMerging, setIsMerging] = useState<boolean>(false);
     const [mergeProgress, setMergeProgress] = useState<number>(0);
+    const [progressText, setProgressText] = useState<string>("");
     const [mergeLog, setMergeLog] = useState<string>("");
 
     useEffect(() => {
-        EventsOn("mergeProgress", (progressLine: string) => {
-            setMergeLog(prev => prev + progressLine + "\n");
-            if (progressLine.includes("frame=")) {
-                setMergeProgress(prev => Math.min(prev + 1, 99));
+        // Event listener for structured merge progress
+        EventsOn("mergeProgress", (data: any) => {
+            if (typeof data === 'object' && data !== null && typeof data.percentage === 'number') {
+                // Structured progress object
+                setMergeProgress(data.percentage);
+                const current = data.current?.toFixed(1) || '0.0';
+                const total = data.total?.toFixed(1) || '0.0';
+                setProgressText(`Merging: ${data.percentage.toFixed(1)}% (${current}s / ${total}s)`);
+            } else if (typeof data === 'string') {
+                // Simple string message (e.g., "Normalizing...", "Fast merge failed...")
+                setProgressText(data);
+                setMergeLog(prev => prev + data + "\n");
             }
         });
 
@@ -131,8 +140,12 @@ function App() {
             setStatusMessage("Merge operation cancelled.");
             setIsMerging(false);
             setMergeProgress(0);
+            setProgressText("");
             setMergeLog("");
         });
+
+        // In a real app, you'd want a way to clean up listeners, e.g., EventsOff.
+        // This is a simplified example.
     }, []);
 
     const sensors = useSensors(
@@ -177,6 +190,7 @@ function App() {
         setStatusMessage("Starting merge...");
         setIsMerging(true);
         setMergeProgress(0);
+        setProgressText("");
         setMergeLog("");
 
         MergeVideos(filesToMerge)
@@ -244,11 +258,10 @@ function App() {
 
                 {isMerging && (
                     <div className="progress-section">
-                        <h3>Merging...</h3>
                         <div className="progress-bar-container">
                             <div className="progress-bar" style={{width: `${mergeProgress}%`}}></div>
                         </div>
-                        <p className="progress-text">{mergeProgress.toFixed(0)}% Complete</p>
+                        <p className="progress-text">{progressText || 'Starting...'}</p>
                         {mergeLog && (
                             <pre className="merge-log">
                                 {mergeLog.split('\n').slice(-10).join('\n')}

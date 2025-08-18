@@ -444,28 +444,70 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 	}
 	tempFile.Close()
 
-	// All files are now standardized, so a fast stream copy is safe and reliable.
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", tempFile.Name(), "-c", "copy", outputFile)
+	// Calculate total duration for progress reporting
+	var totalDuration float64
+	for _, video := range videoFiles {
+		totalDuration += video.Duration
+	}
 
-	stderr, err := cmd.StderrPipe()
+	// All files are now standardized, so a fast stream copy is safe and reliable.
+	// Use "-nostats -progress -" to pipe structured progress to stdout.
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", tempFile.Name(), "-c", "copy", "-nostats", "-progress", "-", outputFile)
+
+	// Stderr will be used to capture actual errors, since stdout is for progress
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", fmt.Errorf("failed to create stderr pipe: %w", err)
+		return "", fmt.Errorf("failed to create stdout pipe for progress: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("failed to start ffmpeg command: %w", err)
 	}
 
+	// Goroutine to read and parse ffmpeg's structured progress from stdout
 	go func() {
-		scanner := bufio.NewScanner(stderr)
+		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			line := scanner.Text()
-			if strings.Contains(line, "frame=") && strings.Contains(line, "time=") {
-				runtime.EventsEmit(a.ctx, "mergeProgress", line)
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+
+			if key == "out_time_ms" {
+				outTimeUs, err := strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					continue
+				}
+				// FFmpeg reports progress in microseconds
+				progressSeconds := float64(outTimeUs) / 1_000_000
+				if totalDuration > 0 {
+					percentage := (progressSeconds / totalDuration) * 100
+					if percentage > 100 {
+						percentage = 100
+					}
+					runtime.EventsEmit(a.ctx, "mergeProgress", map[string]interface{}{
+						"percentage": percentage,
+						"current":    progressSeconds,
+						"total":      totalDuration,
+					})
+				}
+			} else if key == "progress" && value == "end" {
+				// Ensure the progress bar hits 100% on completion
+				runtime.EventsEmit(a.ctx, "mergeProgress", map[string]interface{}{
+					"percentage": 100.0,
+					"current":    totalDuration,
+					"total":      totalDuration,
+				})
 			}
 		}
 		if err := scanner.Err(); err != nil {
-			log.Printf("Error reading ffmpeg stderr: %v", err)
+			log.Printf("Error reading ffmpeg stdout for progress: %v", err)
 		}
 	}()
 
@@ -474,7 +516,8 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 		if ctx.Err() == context.Canceled {
 			return "", fmt.Errorf("merge cancelled by user")
 		}
-		return "", fmt.Errorf("ffmpeg execution failed: %w", err)
+		// Include ffmpeg's stderr in the error message for better debugging
+		return "", fmt.Errorf("ffmpeg execution failed: %w\nffmpeg stderr:\n%s", err, stderr.String())
 	}
 
 	return fmt.Sprintf("Successfully merged videos to %s", outputFile), nil
