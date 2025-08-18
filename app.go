@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings" // Added for string manipulation
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -25,7 +26,8 @@ type VideoFile struct {
 	Duration        float64 `json:"duration"`
 	Resolution      string  `json:"resolution"`
 	Codec           string  `json:"codec"`
-	ThumbnailBase64 string  `json:"thumbnailBase64"` // Base64 encoded thumbnail image
+	ThumbnailBase64 string  `json:"thumbnailBase64"`
+	HasAudio        bool    `json:"hasAudio"`
 }
 
 // MergePreset defines the settings for the output video.
@@ -58,7 +60,7 @@ type MergeJob struct {
 
 // App struct
 type App struct {
-	ctx context.Context
+	ctx        context.Context
 	cancelFunc context.CancelFunc
 }
 
@@ -150,11 +152,18 @@ func (a *App) GetVideoMetadata(path string) (VideoFile, error) {
 	}
 
 	var videoStream FFProbeStream
+	hasAudio := false
 	for _, stream := range ffprobeData.Streams {
 		if stream.CodecType == "video" {
 			videoStream = stream
-			break
+		} else if stream.CodecType == "audio" {
+			hasAudio = true
 		}
+	}
+
+	// Validate that a valid video stream was found
+	if videoStream.Width == 0 || videoStream.Height == 0 {
+		return VideoFile{}, fmt.Errorf("no valid video stream found in %s", path)
 	}
 
 	duration, _ := strconv.ParseFloat(ffprobeData.Format.Duration, 64)
@@ -167,6 +176,7 @@ func (a *App) GetVideoMetadata(path string) (VideoFile, error) {
 		Duration:   duration,
 		Resolution: fmt.Sprintf("%dx%d", videoStream.Width, videoStream.Height),
 		Codec:      videoStream.CodecName,
+		HasAudio:   hasAudio,
 	}
 
 	// Generate thumbnail
@@ -183,8 +193,14 @@ func (a *App) GetVideoMetadata(path string) (VideoFile, error) {
 
 // GenerateThumbnail generates a base64 encoded thumbnail for a given video path.
 func (a *App) GenerateThumbnail(videoPath string) (string, error) {
-	// Use ffmpeg to extract a frame at 1 second mark and output as base64
-	cmd := exec.Command("ffmpeg", "-i", videoPath, "-ss", "00:00:01.000", "-vframes", "1", "-f", "image2pipe", "-")
+	// Use -ss before -i for fast seeking. Output as mjpeg for correct data URI.
+	cmd := exec.Command("ffmpeg",
+		"-ss", "1",
+		"-i", videoPath,
+		"-frames:v", "1",
+		"-f", "mjpeg",
+		"-",
+	)
 
 	var out bytes.Buffer
 	var stderr bytes.Buffer
@@ -193,11 +209,16 @@ func (a *App) GenerateThumbnail(videoPath string) (string, error) {
 
 	err := cmd.Run()
 	if err != nil {
-		return "", fmt.Errorf(`failed to generate thumbnail for %s: %s\n%s`, videoPath, err.Error(), stderr.String())
+		return "", fmt.Errorf("failed to generate thumbnail for %s: %s\n%s", videoPath, err.Error(), stderr.String())
 	}
 
 	encodedString := base64.StdEncoding.EncodeToString(out.Bytes())
 	return "data:image/jpeg;base64," + encodedString, nil
+}
+
+// escapeFFConcatPath escapes a path for use in ffmpeg's concat demuxer file.
+func escapeFFConcatPath(p string) string {
+	return strings.ReplaceAll(p, "'", "'\\''")
 }
 
 // GetPresets returns a list of predefined merge presets.
@@ -219,142 +240,81 @@ func (a *App) CancelMerge() {
 	}
 }
 
-// handleIncompatibleVideos checks for codec and resolution mismatches and handles re-encoding.
-// It returns a new list of video files (if re-encoding was needed) and a temporary directory path to be cleaned up.
-func (a *App) handleIncompatibleVideos(videoFiles []VideoFile) ([]VideoFile, string, error) {
-	if len(videoFiles) == 0 {
-		return nil, "", fmt.Errorf("no video files provided")
-	}
-
-	firstVideo := videoFiles[0]
-	codecMismatch := false
-	resolutionMismatch := false
-	highestWidth := 0
-	highestHeight := 0
-
-	// First pass: check for mismatches and find the highest resolution
-	for _, video := range videoFiles {
-		if video.Codec != firstVideo.Codec {
-			codecMismatch = true
-			break
-		}
-		if video.Resolution != firstVideo.Resolution {
-			resolutionMismatch = true
-		}
-
-		// Parse resolution to find the highest for the re-encoding target
-		var w, h int
-		fmt.Sscanf(video.Resolution, "%dx%d", &w, &h)
-		if w > highestWidth {
-			highestWidth = w
-			highestHeight = h
-		}
-	}
-
-	// Handle codec mismatch: this is a hard stop
-	if codecMismatch {
-		runtime.MessageDialog(a.ctx, runtime.MessageDialogOptions{
-			Type:    runtime.ErrorDialog,
-			Title:   "Codec Mismatch",
-			Message: fmt.Sprintf("All videos must have the same codec. The first video uses '%s', but at least one other video uses a different codec.", firstVideo.Codec),
-		})
-		return nil, "", fmt.Errorf("codec mismatch")
-	}
-
-	// If no resolution mismatch, we can proceed with a fast merge
-	if !resolutionMismatch {
-		return videoFiles, "", nil
-	}
-
-	// Handle resolution mismatch: ask the user if they want to re-encode
-	targetResolution := fmt.Sprintf("%dx%d", highestWidth, highestHeight)
-	dialogResult, err := runtime.MessageDialog(a.ctx, runtime.MessageDialogOptions{
-		Type:    runtime.QuestionDialog,
-		Title:   "Resolution Mismatch",
-		Message: fmt.Sprintf("The selected videos have different resolutions. Do you want to re-encode them all to the highest resolution (%s) to proceed with the merge?", targetResolution),
-		Buttons: []string{"Yes", "No"},
-	})
+// viết list concat cho ffmpeg
+func writeConcatList(paths []string) (string, error) {
+	f, err := os.CreateTemp("", "ffmpeg-list-*.txt")
 	if err != nil {
-		return nil, "", err
+		return "", err
 	}
-	if dialogResult == "No" {
-		return nil, "", fmt.Errorf("user cancelled re-encoding")
-	}
-
-	// --- Re-encoding process starts ---
-	runtime.EventsEmit(a.ctx, "mergeProgress", "Starting re-encoding process...")
-
-	// Create a temporary directory for the scaled files
-	tempDir, err := os.MkdirTemp("", "stitcher-scaled-*")
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to create temp dir for scaling: %w", err)
-	}
-
-	processedFiles := make([]VideoFile, len(videoFiles))
-	for i, video := range videoFiles {
-		if video.Resolution == targetResolution {
-			// This video is already the correct resolution, just copy its data
-			processedFiles[i] = video
-			continue
-		}
-
-		// This video needs to be scaled
-		runtime.EventsEmit(a.ctx, "mergeProgress", fmt.Sprintf("Scaling %s...", video.FileName))
-		outputFileName := filepath.Join(tempDir, fmt.Sprintf("scaled-%d-%s", i, video.FileName))
-
-		cmd := exec.Command("ffmpeg",
-			"-i", video.Path,
-			"-vf", fmt.Sprintf("scale=%s:force_original_aspect_ratio=decrease,pad=%s:(ow-iw)/2:(oh-ih)/2", targetResolution, targetResolution),
-			"-c:a", "copy",
-			outputFileName,
-		)
-
-		// Run the command and wait for it to finish
-		if err := cmd.Run(); err != nil {
-			// Attempt to clean up before failing
-			os.RemoveAll(tempDir)
-			return nil, "", fmt.Errorf("failed to scale video %s: %w", video.FileName, err)
-		}
-
-		// Create a new VideoFile entry for the scaled video
-		processedFiles[i] = VideoFile{
-			Path:       outputFileName,
-			FileName:   video.FileName, // Keep original name for reference
-			Resolution: targetResolution,
-			Codec:      video.Codec,
-			// Other fields like size, duration could be re-calculated, but path is the most critical one
+	for _, p := range paths {
+		if _, err := fmt.Fprintf(f, "file '%s'\n", escapeFFConcatPath(p)); err != nil {
+			f.Close()
+			os.Remove(f.Name())
+			return "", err
 		}
 	}
-
-	runtime.EventsEmit(a.ctx, "mergeProgress", "Re-encoding complete. Starting final merge...")
-	return processedFiles, tempDir, nil
+	f.Close()
+	return f.Name(), nil
 }
 
+// thử concat -c copy (fast merge). Trả về nil nếu thành công.
+func tryFastMerge(ctx context.Context, inputPaths []string, output string) error {
+	listFile, err := writeConcatList(inputPaths)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(listFile)
 
-// MergeVideos takes a list of video files and merges them into a single output file.
+	// -xerror: coi warning nghiêm trọng là lỗi để fail sớm
+	cmd := exec.CommandContext(ctx, "ffmpeg",
+		"-y", "-hide_banner", "-loglevel", "error", "-xerror",
+		"-f", "concat", "-safe", "0", "-i", listFile,
+		"-c", "copy",
+		output,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("fast merge failed: %v\nffmpeg: %s", err, string(out))
+	}
+	return nil
+}
+
+func looksFastMergeable(vs []VideoFile) bool {
+	if len(vs) == 0 {
+		return false
+	}
+	// YÊU CẦU TỐI THIỂU: cùng codec video, cùng WxH, cùng “có audio hay không”
+	// (Thực tế còn cần fps, pix_fmt, SAR, audio params... nhưng check tối thiểu cho nhẹ)
+	base := vs[0]
+	for _, v := range vs[1:] {
+		if v.Codec != base.Codec || v.Resolution != base.Resolution || v.HasAudio != base.HasAudio {
+			return false
+		}
+	}
+	return true
+}
+
+func audioMismatch(vs []VideoFile) (has, no bool) {
+	for _, v := range vs {
+		if v.HasAudio {
+			has = true
+		} else {
+			no = true
+		}
+	}
+	return
+}
+
+// MergeVideos normalizes all videos to a standard format and then merges them.
 func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 	if len(videoFiles) < 2 {
 		return "", fmt.Errorf("at least two videos are required to merge")
 	}
 
-	// Handle potential incompatibilities (re-encoding if necessary)
-	processedFiles, tempDir, err := a.handleIncompatibleVideos(videoFiles)
-	if err != nil {
-		return "", fmt.Errorf("failed to process videos: %w", err)
-	}
-	// If a temp directory was created, make sure it's cleaned up
-	if tempDir != "" {
-		defer os.RemoveAll(tempDir)
-	}
-
-	// Ask user for save location
-	ext := filepath.Ext(processedFiles[0].Path)
-	if ext == "" { // If the scaled file has no extension, default to mp4
-		ext = ".mp4"
-	}
+	// 1) Hỏi nơi lưu trước: dùng chung cho fast + fallback
 	outputFile, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
 		Title:           "Save Merged Video As...",
-		DefaultFilename: fmt.Sprintf("merged-video%s", ext),
+		DefaultFilename: fmt.Sprintf("merged-video-%s.mp4", time.Now().Format("20060102-150405")),
 	})
 	if err != nil {
 		return "", err
@@ -363,49 +323,143 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 		return "", fmt.Errorf("save operation cancelled")
 	}
 
+	// 2) Thử fast merge nếu “có vẻ” hợp lệ
+	inputPaths := make([]string, len(videoFiles))
+	for i, v := range videoFiles {
+		inputPaths[i] = v.Path
+	}
+
+	if looksFastMergeable(videoFiles) {
+		runtime.EventsEmit(a.ctx, "mergeProgress", "Trying fast merge (stream copy)...")
+		ctx, cancel := context.WithCancel(a.ctx)
+		a.cancelFunc = cancel
+		defer func() { cancel(); a.cancelFunc = nil }()
+
+		if err := tryFastMerge(ctx, inputPaths, outputFile); err == nil {
+			return fmt.Sprintf("Successfully merged videos to %s (fast merge)", outputFile), nil
+		} else {
+			log.Printf("[fast-merge] %v", err)
+			runtime.EventsEmit(a.ctx, "mergeProgress", "Fast merge failed, falling back to normalization...")
+		}
+	}
+
+	// --- Universal Normalization Workflow ---
+	runtime.EventsEmit(a.ctx, "mergeProgress", "Starting normalization process...")
+
+	// Determine the highest resolution to use as the target
+	highestWidth := 0
+	highestHeight := 0
+	for _, video := range videoFiles {
+		var w, h int
+		fmt.Sscanf(video.Resolution, "%dx%d", &w, &h)
+		if w > highestWidth {
+			highestWidth = w
+			highestHeight = h
+		}
+	}
+
+	hasAud, noAud := audioMismatch(videoFiles)
+	needAudioNormalize := hasAud && noAud
+
+	// Create a temporary directory for the normalized files
+	tempDir, err := os.MkdirTemp("", "stitcher-normalized-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp dir for normalization: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.cancelFunc = cancel
+	defer func() { cancel(); a.cancelFunc = nil }()
+
+	processedFilePaths := make([]string, len(videoFiles))
+	for i, video := range videoFiles {
+		runtime.EventsEmit(a.ctx, "mergeProgress", fmt.Sprintf("Normalizing %s...", video.FileName))
+		outputFileName := filepath.Join(tempDir, fmt.Sprintf("normalized-%d-%s", i, filepath.Base(video.Path)))
+
+		vf := fmt.Sprintf(
+			"scale=%d:%d:force_original_aspect_ratio=decrease,setsar=1,format=yuv420p,"+
+				"pad=%d:%d:(ow-iw)/2:(oh-ih)/2,fps=30",
+			highestWidth, highestHeight, highestWidth, highestHeight)
+
+		args := []string{
+			"-y", "-hide_banner", "-loglevel", "error",
+			"-i", video.Path,
+			// map video chính & loại bỏ phụ đề/data/metadata/chapters
+			"-map", "0:v:0", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1",
+			"-vf", vf,
+			"-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+		}
+
+		if needAudioNormalize {
+			if video.HasAudio {
+				// có audio -> chuẩn hoá AAC 48k stereo
+				args = append(args, "-map", "0:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2")
+			} else {
+				// không audio -> synthesize audio im lặng
+				args = append(args,
+					"-f", "lavfi", "-t", "999999", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+					"-shortest",
+					"-map", "1:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2",
+				)
+			}
+		} else {
+			// tất cả đều có audio hoặc đều không có
+			if video.HasAudio {
+				args = append(args, "-map", "0:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2")
+			} else {
+				args = append(args, "-an")
+			}
+		}
+
+		args = append(args, outputFileName)
+
+		cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("failed to normalize %s: %v\nffmpeg:\n%s", video.FileName, err, stderr.String())
+		}
+
+		processedFilePaths[i] = outputFileName
+	}
+
+	runtime.EventsEmit(a.ctx, "mergeProgress", "Normalization complete. Starting final merge...")
+
+	// --- Final Concat Step ---
+
 	// Create a temporary file to list the inputs for ffmpeg
 	tempFile, err := os.CreateTemp("", "ffmpeg-list-*.txt")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file for ffmpeg: %w", err)
 	}
-	defer os.Remove(tempFile.Name()) // Clean up the temp file
+	defer os.Remove(tempFile.Name())
 
-	for _, video := range processedFiles {
-		// FFmpeg's concat demuxer requires file paths to be quoted if they contain special characters.
-		if _, err := tempFile.WriteString(fmt.Sprintf("file '%s'\n", video.Path)); err != nil {
+	for _, path := range processedFilePaths {
+		line := fmt.Sprintf("file '%s'\n", escapeFFConcatPath(path))
+		if _, err := tempFile.WriteString(line); err != nil {
 			return "", fmt.Errorf("failed to write to temp file: %w", err)
 		}
 	}
 	tempFile.Close()
 
-	// Create a context with cancellation for the ffmpeg command
-	ctx, cancel := context.WithCancel(a.ctx)
-	a.cancelFunc = cancel // Store the cancel function
-	defer func() {        // Ensure cancel is called when function exits
-		cancel()
-		a.cancelFunc = nil
-	}()
+	// All files are now standardized, so a fast stream copy is safe and reliable.
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", tempFile.Name(), "-c", "copy", outputFile)
 
-	// Execute FFmpeg command - always use -c copy because inputs are now compatible
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-f", "concat", "-safe", "0", "-i", tempFile.Name(), "-c", "copy", outputFile)
-
-	// Capture stderr for progress monitoring
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return "", fmt.Errorf("failed to create stderr pipe: %w", err)
 	}
 
-	// Start the command
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("failed to start ffmpeg command: %w", err)
 	}
 
-	// Goroutine to read and parse ffmpeg progress
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			line := scanner.Text()
-			// This is a simplified example, actual parsing will be more complex
 			if strings.Contains(line, "frame=") && strings.Contains(line, "time=") {
 				runtime.EventsEmit(a.ctx, "mergeProgress", line)
 			}
@@ -415,10 +469,8 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 		}
 	}()
 
-	// Wait for the command to finish
 	err = cmd.Wait()
 	if err != nil {
-		// Check if the error was due to cancellation
 		if ctx.Err() == context.Canceled {
 			return "", fmt.Errorf("merge cancelled by user")
 		}

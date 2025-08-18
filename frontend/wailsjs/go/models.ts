@@ -24,6 +24,7 @@ export namespace main {
 	    resolution: string;
 	    codec: string;
 	    thumbnailBase64: string;
+	    hasAudio: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new VideoFile(source);
@@ -38,6 +39,7 @@ export namespace main {
 	        this.resolution = source["resolution"];
 	        this.codec = source["codec"];
 	        this.thumbnailBase64 = source["thumbnailBase64"];
+	        this.hasAudio = source["hasAudio"];
 	    }
 	}
 
