@@ -332,3 +332,90 @@ p {
         align-self: flex-end; /* Stays at flex-end */
     }
 }
+
+/* Toggle Switch Component */
+.toggle-switch-container {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    padding: 10px;
+    background-color: #253244; /* Slightly different background to group it */
+    border-radius: 8px;
+    flex-grow: 1;
+    min-width: 300px;
+}
+
+.toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 50px;
+    height: 28px;
+    flex-shrink: 0;
+}
+
+.toggle-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #4a5a6f;
+    -webkit-transition: .4s;
+    transition: .4s;
+    border-radius: 28px;
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 20px;
+    width: 20px;
+    left: 4px;
+    bottom: 4px;
+    background-color: white;
+    -webkit-transition: .4s;
+    transition: .4s;
+    border-radius: 50%;
+}
+
+input:checked + .slider {
+    background-color: #27ae60; /* Green for 'on' state */
+}
+
+input:focus + .slider {
+    box-shadow: 0 0 1px #27ae60;
+}
+
+input:checked + .slider:before {
+    -webkit-transform: translateX(22px);
+    -ms-transform: translateX(22px);
+    transform: translateX(22px);
+}
+
+input:disabled + .slider {
+    cursor: not-allowed;
+    background-color: #5a6a7a;
+}
+
+.toggle-info {
+    text-align: left;
+}
+
+.toggle-info label {
+    font-weight: bold;
+    color: var(--primary-text);
+    display: block;
+    margin-bottom: 4px;
+}
+
+.toggle-info small {
+    font-size: 0.85rem;
+    color: var(--secondary-text);
+}

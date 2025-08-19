@@ -6,6 +6,8 @@ export function CancelMerge():Promise<void>;
 
 export function GenerateThumbnail(arg1:string):Promise<string>;
 
+export function GetHardwareEncoders():Promise<Array<string>>;
+
 export function GetPresets():Promise<Array<main.MergePreset>>;
 
 export function GetVideoMetadata(arg1:string):Promise<main.VideoFile>;
@@ -13,3 +15,5 @@ export function GetVideoMetadata(arg1:string):Promise<main.VideoFile>;
 export function MergeVideos(arg1:Array<main.VideoFile>):Promise<string>;
 
 export function SelectVideos():Promise<Array<main.VideoFile>>;
+
+export function SetUseHardwareEncoder(arg1:boolean):Promise<void>;

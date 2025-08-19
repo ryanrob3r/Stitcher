@@ -62,11 +62,35 @@ type MergeJob struct {
 type App struct {
 	ctx        context.Context
 	cancelFunc context.CancelFunc
+
+	useHW    bool // Whether to use hardware acceleration
+	encAvail map[string]bool
 }
 
 // NewApp creates a new App application struct
 func NewApp() *App {
 	return &App{}
+}
+
+func detectEncoders() (map[string]bool, error) {
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-encoders")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	s := string(out)
+	have := map[string]bool{
+		"h264_nvenc": strings.Contains(s, "h264_nvenc"),
+		"hevc_nvenc": strings.Contains(s, "hevc_nvenc"),
+		"h264_qsv":   strings.Contains(s, "h264_qsv"),
+		"hevc_qsv":   strings.Contains(s, "hevc_qsv"),
+		"h264_amf":   strings.Contains(s, "h264_amf"),
+		"hevc_amf":   strings.Contains(s, "hevc_amf"),
+		// Nếu cần macOS:
+		// "h264_videotoolbox": strings.Contains(s, "h264_videotoolbox"),
+		// "hevc_videotoolbox": strings.Contains(s, "hevc_videotoolbox"),
+	}
+	return have, nil
 }
 
 // startup is called when the app starts. The context is saved
@@ -81,6 +105,62 @@ func (a *App) startup(ctx context.Context) {
 			Message: "FFmpeg is required for this application to function. Please install it and ensure it is in your system's PATH.\n\nFor installation instructions, please visit: https://ffmpeg.org/download.html",
 		})
 		os.Exit(1)
+	}
+	// detect once
+	enc, err := detectEncoders()
+	if err == nil {
+		a.encAvail = enc
+	} else {
+		a.encAvail = map[string]bool{}
+		log.Printf("detectEncoders error: %v", err)
+	}
+}
+
+// gọi từ UI khi người dùng bật/tắt toggle
+func (a *App) SetUseHardwareEncoder(use bool) {
+	a.useHW = use
+}
+
+// UI có thể gọi để biết có GPU encoder nào khả dụng không & tên nào
+func (a *App) GetHardwareEncoders() []string {
+	names := []string{}
+	for k, ok := range a.encAvail {
+		if ok {
+			names = append(names, k)
+		}
+	}
+	return names
+}
+
+type EncArgs struct {
+	Codec []string
+	Name  string // tên encoder dùng thực tế (để hiển thị nếu muốn)
+}
+
+func buildVideoEncoderArgs(useHW bool, have map[string]bool) EncArgs {
+	if useHW {
+		switch {
+		case have["h264_nvenc"]:
+			return EncArgs{
+				Name:  "h264_nvenc",
+				Codec: []string{"-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr_hq", "-cq", "23", "-b:v", "0", "-pix_fmt", "yuv420p"},
+			}
+		case have["h264_qsv"]:
+			return EncArgs{
+				Name:  "h264_qsv",
+				Codec: []string{"-c:v", "h264_qsv", "-preset", "medium", "-rc", "icq", "-global_quality", "23", "-pix_fmt", "yuv420p"},
+			}
+		case have["h264_amf"]:
+			return EncArgs{
+				Name:  "h264_amf",
+				Codec: []string{"-c:v", "h264_amf", "-quality", "quality", "-rc", "vbr", "-qvbr_quality_level", "23", "-pix_fmt", "yuv420p"},
+			}
+		}
+		// không có encoder HW khả dụng → rơi xuống CPU
+	}
+	return EncArgs{
+		Name:  "libx264",
+		Codec: []string{"-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"},
 	}
 }
 
@@ -372,39 +452,52 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 	a.cancelFunc = cancel
 	defer func() { cancel(); a.cancelFunc = nil }()
 
+	enc := buildVideoEncoderArgs(a.useHW, a.encAvail)
+
 	processedFilePaths := make([]string, len(videoFiles))
 	for i, video := range videoFiles {
 		runtime.EventsEmit(a.ctx, "mergeProgress", fmt.Sprintf("Normalizing %s...", video.FileName))
 		outputFileName := filepath.Join(tempDir, fmt.Sprintf("normalized-%d-%s", i, filepath.Base(video.Path)))
 
+		// 1) Filter video (scale + pad + fps + SAR)
 		vf := fmt.Sprintf(
 			"scale=%d:%d:force_original_aspect_ratio=decrease,setsar=1,format=yuv420p,"+
 				"pad=%d:%d:(ow-iw)/2:(oh-ih)/2,fps=30",
 			highestWidth, highestHeight, highestWidth, highestHeight)
 
+		// 2) BẮT BUỘC: đưa tất cả -i (input) TRƯỚC khi -map
 		args := []string{
 			"-y", "-hide_banner", "-loglevel", "error",
-			"-i", video.Path,
-			// map video chính & loại bỏ phụ đề/data/metadata/chapters
-			"-map", "0:v:0", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1",
-			"-vf", vf,
-			"-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+			"-i", video.Path, // input 0: file gốc
 		}
+
+		// Nếu file này không có audio và đang cần đồng bộ audio -> thêm anullsrc làm input 1
+		synthSilence := needAudioNormalize && !video.HasAudio
+		if synthSilence {
+			args = append(args,
+				"-f", "lavfi", "-t", "999999", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", // input 1
+			)
+		}
+
+		// 3) Áp filter + chọn encoder video (GPU/CPU) từ enc.Codec
+		args = append(args, "-vf", vf)
+		args = append(args, enc.Codec...)
+
+		// 4) Map stream & audio để mọi file có cùng layout
+		//    - map video chính
+		//    - bỏ phụ đề/data/metadata/chapters để không lệch số lượng stream
+		args = append(args, "-map", "0:v:0", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1")
 
 		if needAudioNormalize {
 			if video.HasAudio {
-				// có audio -> chuẩn hoá AAC 48k stereo
+				// Có audio -> chuẩn hóa AAC 48k stereo
 				args = append(args, "-map", "0:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2")
 			} else {
-				// không audio -> synthesize audio im lặng
-				args = append(args,
-					"-f", "lavfi", "-t", "999999", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
-					"-shortest",
-					"-map", "1:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2",
-				)
+				// Không audio -> lấy audio im lặng từ input 1
+				args = append(args, "-map", "1:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest")
 			}
 		} else {
-			// tất cả đều có audio hoặc đều không có
+			// Tất cả cùng có hoặc cùng không có audio
 			if video.HasAudio {
 				args = append(args, "-map", "0:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2")
 			} else {
@@ -412,11 +505,17 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 			}
 		}
 
+		// 5) Output đích
 		args = append(args, outputFileName)
 
+		// 6) Chạy FFmpeg
 		cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
+
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("failed to normalize %s: %v\nffmpeg:\n%s", video.FileName, err, stderr.String())
+		}
 
 		if err := cmd.Run(); err != nil {
 			return "", fmt.Errorf("failed to normalize %s: %v\nffmpeg:\n%s", video.FileName, err, stderr.String())

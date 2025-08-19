@@ -10,6 +10,10 @@ export function GenerateThumbnail(arg1) {
   return window['go']['main']['App']['GenerateThumbnail'](arg1);
 }
 
+export function GetHardwareEncoders() {
+  return window['go']['main']['App']['GetHardwareEncoders']();
+}
+
 export function GetPresets() {
   return window['go']['main']['App']['GetPresets']();
 }
@@ -24,4 +28,8 @@ export function MergeVideos(arg1) {
 
 export function SelectVideos() {
   return window['go']['main']['App']['SelectVideos']();
+}
+
+export function SetUseHardwareEncoder(arg1) {
+  return window['go']['main']['App']['SetUseHardwareEncoder'](arg1);
 }

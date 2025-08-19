@@ -1,8 +1,15 @@
-import {useEffect, useState} from 'react';
+import { useEffect, useState } from 'react';
 import './App.css';
-import {main} from "../wailsjs/go/models";
-import {CancelMerge, GetVideoMetadata, MergeVideos, SelectVideos} from "../wailsjs/go/main/App";
-import {EventsOn} from "../wailsjs/runtime/runtime";
+import { main } from "../wailsjs/go/models";
+import {
+    CancelMerge,
+    GetHardwareEncoders,
+    GetVideoMetadata,
+    MergeVideos,
+    SelectVideos,
+    SetUseHardwareEncoder
+} from "../wailsjs/go/main/App";
+import { EventsOn } from "../wailsjs/runtime/runtime";
 
 import {
     DndContext,
@@ -20,7 +27,7 @@ import {
     useSortable,
     verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import {CSS} from '@dnd-kit/utilities';
+import { CSS } from '@dnd-kit/utilities';
 
 // Extend the Go model type for frontend state management
 type VideoFile = main.VideoFile & {
@@ -42,8 +49,8 @@ interface VideoItemProps {
     file: VideoFile;
 }
 
-function VideoItem({file}: VideoItemProps) {
-    const {attributes, listeners, setNodeRef, transform, transition} = useSortable({id: file.path});
+function VideoItem({ file }: VideoItemProps) {
+    const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: file.path });
 
     const style = {
         transform: CSS.Transform.toString(transform),
@@ -95,7 +102,7 @@ function VideoItem({file}: VideoItemProps) {
                 ) : (
                     <div className="video-thumbnail-placeholder" aria-label="No thumbnail available">
                         <svg className="fallback-icon" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
-                            <path d="M4 4H20C21.1 4 22 4.9 22 6V18C22 19.1 21.1 20 20 20H4C2.9 20 2 19.1 2 18V6C2 4.9 2.9 4 4 4ZM20 18V6H4V18H20ZM9.5 12L16 16V8L9.5 12Z"/>
+                            <path d="M4 4H20C21.1 4 22 4.9 22 6V18C22 19.1 21.1 20 20 20H4C2.9 20 2 19.1 2 18V6C2 4.9 2.9 4 4 4ZM20 18V6H4V18H20ZM9.5 12L16 16V8L9.5 12Z" />
                         </svg>
                     </div>
                 )}
@@ -119,18 +126,41 @@ function App() {
     const [mergeProgress, setMergeProgress] = useState<number>(0);
     const [progressText, setProgressText] = useState<string>("");
     const [mergeLog, setMergeLog] = useState<string>("");
+    const [useGpu, setUseGpu] = useState<boolean>(false);
+    const [availableGpuEncoders, setAvailableGpuEncoders] = useState<string[]>([]);
+    const [activeEncoder, setActiveEncoder] = useState<string>(""); // hiển thị encoder đang dùng
+
 
     useEffect(() => {
-        // Event listener for structured merge progress
+        (async () => {
+            try {
+                const encs = await GetHardwareEncoders();
+                setAvailableGpuEncoders(encs || []);
+                // lấy trạng thái đã lưu, chỉ bật nếu có encoder khả dụng
+                const saved = localStorage.getItem("useHW") === "true";
+                const next = !!saved && (encs && encs.length > 0);
+                setUseGpu(next);
+                await SetUseHardwareEncoder(next);
+            } catch (e) {
+                setAvailableGpuEncoders([]);
+                setUseGpu(false);
+                await SetUseHardwareEncoder(false);
+            }
+        })();
+    }, []);
+
+    useEffect(() => {
         EventsOn("mergeProgress", (data: any) => {
             if (typeof data === 'object' && data !== null && typeof data.percentage === 'number') {
-                // Structured progress object
                 setMergeProgress(data.percentage);
                 const current = data.current?.toFixed(1) || '0.0';
                 const total = data.total?.toFixed(1) || '0.0';
                 setProgressText(`Merging: ${data.percentage.toFixed(1)}% (${current}s / ${total}s)`);
             } else if (typeof data === 'string') {
-                // Simple string message (e.g., "Normalizing...", "Fast merge failed...")
+                // Bắt encoder đang dùng nếu backend emit "Using encoder: xxx"
+                if (data.startsWith("Using encoder: ")) {
+                    setActiveEncoder(data.replace("Using encoder: ", "").trim());
+                }
                 setProgressText(data);
                 setMergeLog(prev => prev + data + "\n");
             }
@@ -143,14 +173,12 @@ function App() {
             setProgressText("");
             setMergeLog("");
         });
-
-        // In a real app, you'd want a way to clean up listeners, e.g., EventsOff.
-        // This is a simplified example.
     }, []);
+
 
     const sensors = useSensors(
         useSensor(PointerSensor),
-        useSensor(KeyboardSensor, {coordinateGetter: sortableKeyboardCoordinates})
+        useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
     );
 
     async function handleSelectVideos() {
@@ -159,7 +187,7 @@ function App() {
             const initialFiles = await SelectVideos();
             if (initialFiles.length === 0) return;
 
-            const filesWithStatus: VideoFile[] = initialFiles.map(file => ({...file, status: 'loading'}));
+            const filesWithStatus: VideoFile[] = initialFiles.map(file => ({ ...file, status: 'loading' }));
             setVideoFiles(filesWithStatus);
 
             // Now, fetch metadata for each file
@@ -167,12 +195,12 @@ function App() {
                 try {
                     const metadata = await GetVideoMetadata(file.path);
                     setVideoFiles(currentFiles =>
-                        currentFiles.map(f => f.path === file.path ? {...metadata, status: 'loaded'} : f)
+                        currentFiles.map(f => f.path === file.path ? { ...metadata, status: 'loaded' } : f)
                     );
                 } catch (err) {
                     console.error(`Failed to get metadata for ${file.fileName}:`, err);
                     setVideoFiles(currentFiles =>
-                        currentFiles.map(f => f.path === file.path ? {...f, status: 'error', error: String(err)} : f)
+                        currentFiles.map(f => f.path === file.path ? { ...f, status: 'error', error: String(err) } : f)
                     );
                 }
             });
@@ -180,6 +208,14 @@ function App() {
             setStatusMessage(`Error: ${err}`);
         }
     }
+
+    async function handleToggleGpu(checked: boolean) {
+        const allowed = checked && availableGpuEncoders.length > 0 && !isMerging;
+        setUseGpu(allowed);
+        localStorage.setItem("useHW", allowed ? "true" : "false");
+        await SetUseHardwareEncoder(allowed);
+    }
+
 
     function handleMergeVideos() {
         const filesToMerge = videoFiles.filter(f => f.status === 'loaded');
@@ -199,6 +235,7 @@ function App() {
                 setVideoFiles([]);
                 setIsMerging(false);
                 setMergeProgress(100);
+                setActiveEncoder(""); // clear
             })
             .catch(err => {
                 setStatusMessage(`Error: ${err}`);
@@ -212,7 +249,8 @@ function App() {
     }
 
     function handleDragEnd(event: any) {
-        const {active, over} = event;
+        const { active, over } = event;
+        if (!over) { setActiveId(null); return; }
         if (active.id !== over.id) {
             setVideoFiles((items) => {
                 const oldIndex = items.findIndex(item => item.path === active.id);
@@ -222,6 +260,7 @@ function App() {
         }
         setActiveId(null);
     }
+
 
     function handleDragCancel() {
         setActiveId(null);
@@ -252,6 +291,33 @@ function App() {
                             Cancel Merge
                         </button>
                     )}
+                    <div className="toggle-switch-container">
+                        <label className="toggle-switch">
+                            <input
+                                type="checkbox"
+                                id="gpu-switch"
+                                checked={useGpu}
+                                onChange={(e) => handleToggleGpu(e.target.checked)}
+                                disabled={availableGpuEncoders.length === 0 || isMerging}
+                                title={
+                                    availableGpuEncoders.length === 0
+                                        ? "No hardware encoders detected"
+                                        : (isMerging ? "Disabled while merging" : "Enable hardware acceleration for faster processing")
+                                }
+                            />
+                            <span className="slider"></span>
+                        </label>
+                        <div className="toggle-info">
+                            <label htmlFor="gpu-switch">Hardware Acceleration</label>
+                            <small>
+                                {availableGpuEncoders.length === 0
+                                    ? "No compatible GPU detected. Using CPU (libx264)."
+                                    : `Available: ${availableGpuEncoders.join(", ")}`}
+                                {activeEncoder && ` | Active: ${activeEncoder}`}
+                            </small>
+                        </div>
+                    </div>
+
                 </div>
 
                 {statusMessage && <div className="status-message">{statusMessage}</div>}
@@ -259,7 +325,7 @@ function App() {
                 {isMerging && (
                     <div className="progress-section">
                         <div className="progress-bar-container">
-                            <div className="progress-bar" style={{width: `${mergeProgress}%`}}></div>
+                            <div className="progress-bar" style={{ width: `${mergeProgress}%` }}></div>
                         </div>
                         <p className="progress-text">{progressText || 'Starting...'}</p>
                         {mergeLog && (
@@ -285,7 +351,7 @@ function App() {
                                 strategy={verticalListSortingStrategy}
                             >
                                 {videoFiles.map((file) => (
-                                    <VideoItem key={file.path} file={file}/>
+                                    <VideoItem key={file.path} file={file} />
                                 ))}
                             </SortableContext>
                             <DragOverlay>
@@ -310,4 +376,3 @@ function App() {
 }
 
 export default App
-App
