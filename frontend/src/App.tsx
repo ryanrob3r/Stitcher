@@ -47,9 +47,10 @@ function formatBytes(bytes: number, decimals = 2) {
 
 interface VideoItemProps {
     file: VideoFile;
+    onDelete: (path: string) => void;
 }
 
-function VideoItem({ file }: VideoItemProps) {
+function VideoItem({ file, onDelete }: VideoItemProps) {
     const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: file.path });
 
     const style = {
@@ -106,13 +107,23 @@ function VideoItem({ file }: VideoItemProps) {
                         </svg>
                     </div>
                 )}
+                <button
+                    className="btn delete-single-btn"
+                    onClick={() => onDelete(file.path)}
+                    aria-label={`Remove ${file.fileName} from list`}
+                    title={`Remove ${file.fileName}`}
+                >
+                    &times;
+                </button>
             </figure>
-            <div className="video-info" dir="ltr">
+            <div className="video-item-info" dir="ltr">
                 <strong className="video-filename" title={file.fileName}>{file.fileName}</strong>
-                <span className="video-metadata">Duration: {file.duration.toFixed(2)}s</span>
-                <span className="video-metadata">Resolution: {file.resolution}</span>
-                <span className="video-metadata">Codec: {file.codec}</span>
-                <span className="video-metadata">Size: {formatBytes(file.size)}</span>
+                <div className="meta-row">
+                    <span className="meta-chip">{file.resolution}</span>
+                    <span className="meta-chip">{file.codec}</span>
+                    <span className="meta-chip">{file.duration.toFixed(1)}s</span>
+                    <span className="meta-chip">{formatBytes(file.size)}</span>
+                </div>
             </div>
         </div>
     );
@@ -184,13 +195,24 @@ function App() {
     async function handleSelectVideos() {
         setStatusMessage("");
         try {
-            const initialFiles = await SelectVideos();
-            if (initialFiles.length === 0) return;
+            const newlySelectedFiles = await SelectVideos();
+            if (newlySelectedFiles.length === 0) return;
 
-            const filesWithStatus: VideoFile[] = initialFiles.map(file => ({ ...file, status: 'loading' }));
-            setVideoFiles(filesWithStatus);
+            const existingPaths = new Set(videoFiles.map(f => f.path));
+            const uniqueNewFiles = newlySelectedFiles.filter(
+                newFile => !existingPaths.has(newFile.path)
+            );
 
-            // Now, fetch metadata for each file
+            if (uniqueNewFiles.length === 0) {
+                setStatusMessage("No new unique videos were selected.");
+                return;
+            }
+
+            const filesWithStatus: VideoFile[] = uniqueNewFiles.map(file => ({ ...file, status: 'loading' }));
+
+            setVideoFiles(prevFiles => [...prevFiles, ...filesWithStatus]);
+
+            // Now, fetch metadata for each new unique file
             filesWithStatus.forEach(async (file) => {
                 try {
                     const metadata = await GetVideoMetadata(file.path);
@@ -208,6 +230,19 @@ function App() {
             setStatusMessage(`Error: ${err}`);
         }
     }
+
+    const handleDeleteVideo = (pathToDelete: string) => {
+        setVideoFiles(prevFiles => prevFiles.filter(file => file.path !== pathToDelete));
+        setStatusMessage(""); // Clear any previous status message
+    };
+
+    const handleClearAll = () => {
+        setVideoFiles([]);
+        setStatusMessage("");
+        setMergeProgress(0);
+        setProgressText("");
+        setMergeLog("");
+    };
 
     async function handleToggleGpu(checked: boolean) {
         const allowed = checked && availableGpuEncoders.length > 0 && !isMerging;
@@ -276,6 +311,15 @@ function App() {
 
                 <div className="controls">
                     <button className="btn" onClick={handleSelectVideos} disabled={isMerging}>Select Videos</button>
+                    <button
+                        className="btn clear-all-btn"
+                        onClick={handleClearAll}
+                        disabled={isMerging || videoFiles.length === 0}
+                        aria-label="Clear all selected videos"
+                        title="Clear All"
+                    >
+                        Clear All
+                    </button>
                     {!isMerging ? (
                         <button
                             className="btn merge-btn"
@@ -351,7 +395,7 @@ function App() {
                                 strategy={verticalListSortingStrategy}
                             >
                                 {videoFiles.map((file) => (
-                                    <VideoItem key={file.path} file={file} />
+                                    <VideoItem key={file.path} file={file} onDelete={handleDeleteVideo} />
                                 ))}
                             </SortableContext>
                             <DragOverlay>
