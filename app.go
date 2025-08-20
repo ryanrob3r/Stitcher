@@ -517,10 +517,6 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 			return "", fmt.Errorf("failed to normalize %s: %v\nffmpeg:\n%s", video.FileName, err, stderr.String())
 		}
 
-		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("failed to normalize %s: %v\nffmpeg:\n%s", video.FileName, err, stderr.String())
-		}
-
 		processedFilePaths[i] = outputFileName
 	}
 
