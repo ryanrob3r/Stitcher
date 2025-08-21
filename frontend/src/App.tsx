@@ -168,15 +168,19 @@ function App() {
         const loaded = files.filter(f => f.status === 'loaded');
         if (loaded.length < 2) return false;
         const b = loaded[0];
-        return loaded.every(v =>
-            v.codec === b.codec &&
-            v.resolution === b.resolution &&
-            v.hasAudio === b.hasAudio &&
-            v.fps === b.fps &&
-            v.pixelFormat === b.pixelFormat &&
-            v.sampleRate === b.sampleRate &&
-            v.channelLayout === b.channelLayout
-        );
+        const approx = (a: number, c: number) => Math.abs(a - c) <= 0.05;
+        return loaded.every(v => {
+            if (v.codec !== b.codec) return false;
+            if (v.resolution !== b.resolution) return false;
+            if (v.hasAudio !== b.hasAudio) return false;
+            if (!approx(v.fps, b.fps)) return false;
+            if (v.pixelFormat !== b.pixelFormat) return false;
+            if (v.hasAudio) {
+                if (v.sampleRate !== b.sampleRate) return false;
+                if (v.channelLayout !== b.channelLayout) return false;
+            }
+            return true;
+        });
     }
 
     function shortEnc(name: string) {

@@ -2,16 +2,17 @@ package main
 
 import (
     "bufio" // Used for reading ffmpeg progress from stdout
-	"bytes"
-	"context"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"log"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strconv"
+    "bytes"
+    "context"
+    "encoding/base64"
+    "encoding/json"
+    "fmt"
+    "math"
+    "log"
+    "os"
+    "os/exec"
+    "path/filepath"
+    "strconv"
 	"strings" // Added for string manipulation
 	"sync"
 	"sync/atomic"
@@ -330,7 +331,13 @@ func (a *App) GenerateThumbnail(videoPath string) (string, error) {
 
 // escapeFFConcatPath escapes a path for use in ffmpeg's concat demuxer file.
 func escapeFFConcatPath(p string) string {
-	return strings.ReplaceAll(p, "'", "'\\''")
+    // Escape single quotes for ffconcat syntax
+    s := strings.ReplaceAll(p, "'", "'\\''")
+    // On Windows, also escape backslashes for ffmpeg concat demuxer paths
+    if os.PathSeparator == '\\' {
+        s = strings.ReplaceAll(s, "\\", "\\\\")
+    }
+    return s
 }
 
 // GetPresets returns a list of predefined merge presets.
@@ -392,23 +399,37 @@ func tryFastMerge(ctx context.Context, inputPaths []string, output string) error
 }
 
 func looksFastMergeable(vs []VideoFile) bool {
-	if len(vs) == 0 {
-		return false
-	}
-	// Fast merge requires identical codec, resolution, fps, pixel format and audio params
-	base := vs[0]
-	for _, v := range vs[1:] {
-		if v.Codec != base.Codec ||
-			v.Resolution != base.Resolution ||
-			v.HasAudio != base.HasAudio ||
-			v.FPS != base.FPS ||
-			v.PixelFormat != base.PixelFormat ||
-			v.SampleRate != base.SampleRate ||
-			v.ChannelLayout != base.ChannelLayout {
-			return false
-		}
-	}
-	return true
+    if len(vs) == 0 {
+        return false
+    }
+    // Fast merge heuristics (approximate, to avoid false negatives from float rounding)
+    base := vs[0]
+    for _, v := range vs[1:] {
+        if v.Codec != base.Codec {
+            return false
+        }
+        if v.Resolution != base.Resolution {
+            return false
+        }
+        if v.HasAudio != base.HasAudio {
+            return false
+        }
+        // Allow small FPS rounding differences (e.g., 29.97 vs 29.9701)
+        if math.Abs(v.FPS-base.FPS) > 0.05 {
+            return false
+        }
+        // Pixel format is generally consistent for compressed streams; keep strict
+        if v.PixelFormat != base.PixelFormat {
+            return false
+        }
+        // Only check audio params if audio is present
+        if v.HasAudio {
+            if v.SampleRate != base.SampleRate || v.ChannelLayout != base.ChannelLayout {
+                return false
+            }
+        }
+    }
+    return true
 }
 
 func audioMismatch(vs []VideoFile) (has, no bool) {
