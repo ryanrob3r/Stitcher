@@ -475,3 +475,52 @@ input:disabled + .slider {
     font-size: 0.85rem;
     color: var(--secondary-text);
 }
+
+/* Dropzone for onboarding */
+.dropzone {
+    border: 2px dashed #4a5a6f;
+    background: #223144;
+    padding: 32px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+    margin-top: 16px;
+}
+.dropzone.dragover {
+    background: #28415c;
+    border-color: var(--accent-color);
+}
+.dropzone-inner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: var(--secondary-text);
+}
+.dz-icon { font-size: 1.6rem; }
+.dz-title { font-weight: 700; color: var(--primary-text); }
+.dz-subtitle { font-size: .9rem; }
+
+/* Toasts */
+.toasts {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    z-index: 9999;
+}
+.toast {
+    padding: 10px 14px;
+    border-radius: 6px;
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(0,0,0,.3);
+    background: #555;
+    max-width: 360px;
+}
+.toast-success { background: #2e7d32; }
+.toast-error { background: #c62828; }
+.toast-info { background: #1565c0; }

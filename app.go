@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bufio" // Added for reading ffmpeg stderr
+    "bufio" // Used for reading ffmpeg progress from stdout
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -447,7 +447,9 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 	}
 
 	if looksFastMergeable(videoFiles) {
-		runtime.EventsEmit(a.ctx, "mergeProgress", "Trying fast merge (stream copy)...")
+    runtime.EventsEmit(a.ctx, "mergeProgress", map[string]interface{}{
+        "message": "Trying fast merge (stream copy)...",
+    })
 		ctx, cancel := context.WithCancel(a.ctx)
 		a.cancelFunc = cancel
 		defer func() { cancel(); a.cancelFunc = nil }()
@@ -455,13 +457,17 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 		if err := tryFastMerge(ctx, inputPaths, outputFile); err == nil {
 			return fmt.Sprintf("Successfully merged videos to %s (fast merge)", outputFile), nil
 		} else {
-			log.Printf("[fast-merge] %v", err)
-			runtime.EventsEmit(a.ctx, "mergeProgress", "Fast merge failed, falling back to normalization...")
+            log.Printf("[fast-merge] %v", err)
+            runtime.EventsEmit(a.ctx, "mergeProgress", map[string]interface{}{
+                "message": "Fast merge failed, falling back to normalization...",
+            })
 		}
 	}
 
 	// --- Universal Normalization Workflow ---
-	runtime.EventsEmit(a.ctx, "mergeProgress", "Starting normalization process...")
+    runtime.EventsEmit(a.ctx, "mergeProgress", map[string]interface{}{
+        "message": "Starting normalization process...",
+    })
 
 	// Determine the highest resolution to use as the target
 	highestWidth := 0
@@ -490,6 +496,9 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 	defer func() { cancel(); a.cancelFunc = nil }()
 
 	enc := buildVideoEncoderArgs(a.useHW, a.encAvail)
+	runtime.EventsEmit(a.ctx, "mergeProgress", map[string]interface{}{
+		"message": fmt.Sprintf("Using encoder: %s", enc.Name),
+	})
 
 	processedFilePaths := make([]string, len(videoFiles))
 	var wg sync.WaitGroup
@@ -502,7 +511,9 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 		i, video := i, video
 		go func() {
 			defer wg.Done()
-			runtime.EventsEmit(a.ctx, "mergeProgress", fmt.Sprintf("Normalizing %s...", video.FileName))
+            runtime.EventsEmit(a.ctx, "mergeProgress", map[string]interface{}{
+                "message": fmt.Sprintf("Normalizing %s...", video.FileName),
+            })
 			outputFileName := filepath.Join(tempDir, fmt.Sprintf("normalized-%d-%s", i, filepath.Base(video.Path)))
 
 			// 1) Filter video (scale + pad + fps + SAR)
@@ -569,8 +580,10 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 
 			processedFilePaths[i] = outputFileName
 
-			done := atomic.AddInt32(&completed, 1)
-			runtime.EventsEmit(a.ctx, "mergeProgress", fmt.Sprintf("Normalized %s (%d/%d)", video.FileName, done, total))
+            done := atomic.AddInt32(&completed, 1)
+            runtime.EventsEmit(a.ctx, "mergeProgress", map[string]interface{}{
+                "message": fmt.Sprintf("Normalized %s (%d/%d)", video.FileName, done, total),
+            })
 		}()
 	}
 
@@ -588,7 +601,9 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 	case <-doneCh:
 	}
 
-	runtime.EventsEmit(a.ctx, "mergeProgress", "Normalization complete. Starting final merge...")
+    runtime.EventsEmit(a.ctx, "mergeProgress", map[string]interface{}{
+        "message": "Normalization complete. Starting final merge...",
+    })
 
 	// --- Final Concat Step ---
 
@@ -654,19 +669,21 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 					if percentage > 100 {
 						percentage = 100
 					}
-					runtime.EventsEmit(a.ctx, "mergeProgress", map[string]interface{}{
-						"percentage": percentage,
-						"current":    progressSeconds,
-						"total":      totalDuration,
-					})
+                runtime.EventsEmit(a.ctx, "mergeProgress", map[string]interface{}{
+                    "percentage": percentage,
+                    "current":    progressSeconds,
+                    "total":      totalDuration,
+                    "message":    "Merging...",
+                })
 				}
 			} else if key == "progress" && value == "end" {
 				// Ensure the progress bar hits 100% on completion
-				runtime.EventsEmit(a.ctx, "mergeProgress", map[string]interface{}{
-					"percentage": 100.0,
-					"current":    totalDuration,
-					"total":      totalDuration,
-				})
+                runtime.EventsEmit(a.ctx, "mergeProgress", map[string]interface{}{
+                    "percentage": 100.0,
+                    "current":    totalDuration,
+                    "total":      totalDuration,
+                    "message":    "Merge complete",
+                })
 			}
 		}
 		if err := scanner.Err(); err != nil {

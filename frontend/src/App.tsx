@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import './App.css';
 import { main } from "../wailsjs/go/models";
 import {
@@ -140,6 +140,53 @@ function App() {
     const [useGpu, setUseGpu] = useState<boolean>(false);
     const [availableGpuEncoders, setAvailableGpuEncoders] = useState<string[]>([]);
     const [activeEncoder, setActiveEncoder] = useState<string>(""); // hiển thị encoder đang dùng
+    const mergeStartRef = useRef<number | null>(null);
+    const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false);
+
+    type Toast = { id: number; type: 'success' | 'error' | 'info'; message: string };
+    const [toasts, setToasts] = useState<Toast[]>([]);
+    const toastIdRef = useRef(0);
+
+    function pushToast(type: Toast['type'], message: string, ttl = 4000) {
+        const id = ++toastIdRef.current;
+        setToasts(prev => [...prev, { id, type, message }]);
+        setTimeout(() => {
+            setToasts(prev => prev.filter(t => t.id !== id));
+        }, ttl);
+    }
+
+    function formatEta(seconds: number) {
+        if (!isFinite(seconds) || seconds <= 0) return "";
+        const s = Math.floor(seconds % 60);
+        const m = Math.floor((seconds / 60) % 60);
+        const h = Math.floor(seconds / 3600);
+        const pad = (n: number) => n.toString().padStart(2, '0');
+        return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+    }
+
+    function isFastMergeable(files: VideoFile[]) {
+        const loaded = files.filter(f => f.status === 'loaded');
+        if (loaded.length < 2) return false;
+        const b = loaded[0];
+        return loaded.every(v =>
+            v.codec === b.codec &&
+            v.resolution === b.resolution &&
+            v.hasAudio === b.hasAudio &&
+            v.fps === b.fps &&
+            v.pixelFormat === b.pixelFormat &&
+            v.sampleRate === b.sampleRate &&
+            v.channelLayout === b.channelLayout
+        );
+    }
+
+    function shortEnc(name: string) {
+        if (!name) return '';
+        if (name.includes('nvenc')) return 'NVENC';
+        if (name.includes('qsv')) return 'QSV';
+        if (name.includes('amf')) return 'AMF';
+        if (name.includes('libx264')) return 'CPU';
+        return name;
+    }
 
 
     useEffect(() => {
@@ -162,27 +209,43 @@ function App() {
 
     useEffect(() => {
         EventsOn("mergeProgress", (data: any) => {
-            if (typeof data === 'object' && data !== null && typeof data.percentage === 'number') {
-                setMergeProgress(data.percentage);
-                const current = data.current?.toFixed(1) || '0.0';
-                const total = data.total?.toFixed(1) || '0.0';
-                setProgressText(`Merging: ${data.percentage.toFixed(1)}% (${current}s / ${total}s)`);
-            } else if (typeof data === 'string') {
-                // Bắt encoder đang dùng nếu backend emit "Using encoder: xxx"
-                if (data.startsWith("Using encoder: ")) {
-                    setActiveEncoder(data.replace("Using encoder: ", "").trim());
+            if (data && typeof data === 'object') {
+                if (typeof data.percentage === 'number') {
+                    setMergeProgress(data.percentage);
+                    const current = typeof data.current === 'number' ? data.current.toFixed(1) : '0.0';
+                    const total = typeof data.total === 'number' ? data.total.toFixed(1) : '0.0';
+                    const label = data.message || 'Merging...';
+                    let etaLabel = '';
+                    if (typeof data.current === 'number' && typeof data.total === 'number' && data.current > 0) {
+                        const started = mergeStartRef.current ?? Date.now();
+                        const elapsed = (Date.now() - started) / 1000;
+                        const speed = data.current / Math.max(elapsed, 0.001);
+                        const remaining = Math.max(data.total - data.current, 0);
+                        const eta = remaining / Math.max(speed, 0.001);
+                        etaLabel = ` • ETA ${formatEta(eta)}`;
+                    }
+                    setProgressText(`${label} ${data.percentage.toFixed(1)}% (${current}s / ${total}s)${etaLabel}`);
                 }
-                setProgressText(data);
-                setMergeLog(prev => prev + data + "\n");
+                if (typeof data.message === 'string') {
+                    const msg = data.message as string;
+                    if (msg.startsWith("Using encoder: ")) {
+                        setActiveEncoder(msg.replace("Using encoder: ", "").trim());
+                    }
+                    setMergeLog(prev => prev + msg + "\n");
+                    if (typeof data.percentage !== 'number') {
+                        setProgressText(msg);
+                    }
+                }
             }
         });
-
+        
         EventsOn("mergeCancelled", () => {
             setStatusMessage("Merge operation cancelled.");
             setIsMerging(false);
             setMergeProgress(0);
             setProgressText("");
             setMergeLog("");
+            pushToast('info', 'Merge cancelled');
         });
     }, []);
 
@@ -228,7 +291,45 @@ function App() {
             });
         } catch (err) {
             setStatusMessage(`Error: ${err}`);
+            pushToast('error', `Error selecting videos: ${err}` as string);
         }
+    }
+
+    async function handleAddPaths(paths: string[]) {
+        if (!paths || paths.length === 0) return;
+        const existingPaths = new Set(videoFiles.map(f => f.path));
+        const unique = paths.filter(p => !existingPaths.has(p));
+        if (unique.length === 0) {
+            pushToast('info', 'All dropped files are already in the list');
+            return;
+        }
+        const placeholders: any[] = unique.map(p => ({ path: p, fileName: p.split(/[/\\]/).pop() || p }));
+        const filesWithStatus: VideoFile[] = placeholders.map((file: any) => ({ ...(file as any), status: 'loading' }));
+        setVideoFiles(prev => [...prev, ...filesWithStatus]);
+        // Fetch metadata
+        for (const ph of placeholders) {
+            try {
+                const md = await GetVideoMetadata(ph.path);
+                setVideoFiles(current => current.map(f => f.path === ph.path ? { ...md, status: 'loaded' } as any : f));
+            } catch (e) {
+                setVideoFiles(current => current.map(f => f.path === ph.path ? { ...f, status: 'error', error: String(e) } : f));
+            }
+        }
+    }
+
+    function handleDrop(e: React.DragEvent<HTMLDivElement>) {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDraggingOver(false);
+        const files = Array.from(e.dataTransfer?.files || []);
+        const paths = files
+            .map((f: any) => f.path || f.webkitRelativePath || '')
+            .filter((p: string) => !!p);
+        if (paths.length === 0) {
+            pushToast('info', 'Drag-and-drop not supported here. Use "Select Videos".');
+            return;
+        }
+        handleAddPaths(paths);
     }
 
     const handleDeleteVideo = (pathToDelete: string) => {
@@ -263,6 +364,7 @@ function App() {
         setMergeProgress(0);
         setProgressText("");
         setMergeLog("");
+        mergeStartRef.current = Date.now();
 
         MergeVideos(filesToMerge)
             .then(result => {
@@ -271,11 +373,15 @@ function App() {
                 setIsMerging(false);
                 setMergeProgress(100);
                 setActiveEncoder(""); // clear
+                mergeStartRef.current = null;
+                pushToast('success', 'Merge completed successfully');
             })
             .catch(err => {
                 setStatusMessage(`Error: ${err}`);
                 setIsMerging(false);
                 setMergeProgress(0);
+                mergeStartRef.current = null;
+                pushToast('error', `Merge failed: ${err}` as string);
             });
     }
 
@@ -352,14 +458,28 @@ function App() {
                             <span className="slider"></span>
                         </label>
                         <div className="toggle-info">
-                            <label htmlFor="gpu-switch">Hardware Acceleration</label>
-                            <small>
+                            <label htmlFor="gpu-switch">GPU Accel</label>
+                            <small
+                                className="meta-chip"
+                                title={
+                                    availableGpuEncoders.length > 0
+                                        ? `Available: ${availableGpuEncoders.join(', ')}`
+                                        : 'No compatible GPU encoders detected'
+                                }
+                            >
                                 {availableGpuEncoders.length === 0
-                                    ? "No compatible GPU detected. Using CPU (libx264)."
-                                    : `Available: ${availableGpuEncoders.join(", ")}`}
-                                {activeEncoder && ` | Active: ${activeEncoder}`}
+                                    ? 'GPU: Unavailable'
+                                    : (useGpu
+                                        ? `GPU: On${activeEncoder ? ` (${shortEnc(activeEncoder)})` : ''}`
+                                        : 'GPU: Off')}
                             </small>
                         </div>
+                    </div>
+
+                    <div className="compatibility-info">
+                        <small className="meta-chip" title="When all clips match codec, resolution, FPS, pixel format, and audio layout, Stitcher can copy streams without re-encoding.">
+                            {isFastMergeable(videoFiles) ? 'Fast Merge Ready' : 'Will Normalize (re-encode)'}
+                        </small>
                     </div>
 
                 </div>
@@ -377,6 +497,27 @@ function App() {
                                 {mergeLog.split('\n').slice(-10).join('\n')}
                             </pre>
                         )}
+                    </div>
+                )}
+
+                {videoFiles.length === 0 && (
+                    <div
+                        className={`dropzone ${isDraggingOver ? 'dragover' : ''}`}
+                        onDragOver={(e) => { e.preventDefault(); setIsDraggingOver(true); }}
+                        onDragLeave={() => setIsDraggingOver(false)}
+                        onDrop={handleDrop}
+                        onClick={handleSelectVideos}
+                        role="button"
+                        title="Drag & drop videos here or click to select"
+                        aria-label="Drop videos or click to select"
+                    >
+                        <div className="dropzone-inner">
+                            <div className="dz-icon">📹</div>
+                            <div>
+                                <div className="dz-title">Drag & Drop Videos</div>
+                                <div className="dz-subtitle">or click to select files</div>
+                            </div>
+                        </div>
                     </div>
                 )}
 
@@ -414,6 +555,11 @@ function App() {
                         </DndContext>
                     </div>
                 )}
+            </div>
+            <div className="toasts" aria-live="polite" aria-atomic="true">
+                {toasts.map(t => (
+                    <div key={t.id} className={`toast toast-${t.type}`}>{t.message}</div>
+                ))}
             </div>
         </div>
     )
