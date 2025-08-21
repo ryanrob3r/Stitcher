@@ -16,15 +16,19 @@ export namespace main {
 	        this.quality = source["quality"];
 	    }
 	}
-	export class VideoFile {
-	    path: string;
-	    fileName: string;
-	    size: number;
-	    duration: number;
-	    resolution: string;
-	    codec: string;
-	    thumbnailBase64: string;
-	    hasAudio: boolean;
+        export class VideoFile {
+            path: string;
+            fileName: string;
+            size: number;
+            duration: number;
+            resolution: string;
+            codec: string;
+            thumbnailBase64: string;
+            hasAudio: boolean;
+            fps: number;
+            pixelFormat: string;
+            sampleRate: number;
+            channelLayout: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new VideoFile(source);
@@ -37,11 +41,15 @@ export namespace main {
 	        this.size = source["size"];
 	        this.duration = source["duration"];
 	        this.resolution = source["resolution"];
-	        this.codec = source["codec"];
-	        this.thumbnailBase64 = source["thumbnailBase64"];
-	        this.hasAudio = source["hasAudio"];
-	    }
-	}
+                this.codec = source["codec"];
+                this.thumbnailBase64 = source["thumbnailBase64"];
+                this.hasAudio = source["hasAudio"];
+                this.fps = source["fps"];
+                this.pixelFormat = source["pixelFormat"];
+                this.sampleRate = source["sampleRate"];
+                this.channelLayout = source["channelLayout"];
+            }
+        }
 
 }
 

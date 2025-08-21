@@ -28,6 +28,10 @@ type VideoFile struct {
 	Codec           string  `json:"codec"`
 	ThumbnailBase64 string  `json:"thumbnailBase64"`
 	HasAudio        bool    `json:"hasAudio"`
+	FPS             float64 `json:"fps"`
+	PixelFormat     string  `json:"pixelFormat"`
+	SampleRate      int     `json:"sampleRate"`
+	ChannelLayout   string  `json:"channelLayout"`
 }
 
 // MergePreset defines the settings for the output video.
@@ -166,10 +170,14 @@ func buildVideoEncoderArgs(useHW bool, have map[string]bool) EncArgs {
 
 // FFProbeStream defines the structure for a stream in ffprobe output
 type FFProbeStream struct {
-	CodecType string `json:"codec_type"`
-	CodecName string `json:"codec_name"`
-	Width     int    `json:"width"`
-	Height    int    `json:"height"`
+	CodecType     string `json:"codec_type"`
+	CodecName     string `json:"codec_name"`
+	Width         int    `json:"width"`
+	Height        int    `json:"height"`
+	AvgFrameRate  string `json:"avg_frame_rate"`
+	PixFmt        string `json:"pix_fmt"`
+	SampleRate    string `json:"sample_rate"`
+	ChannelLayout string `json:"channel_layout"`
 }
 
 // FFProbeFormat defines the structure for the format section in ffprobe output
@@ -182,6 +190,19 @@ type FFProbeFormat struct {
 type FFProbeResult struct {
 	Streams []FFProbeStream `json:"streams"`
 	Format  FFProbeFormat   `json:"format"`
+}
+
+func parseFrameRate(rate string) float64 {
+	parts := strings.Split(rate, "/")
+	if len(parts) == 2 {
+		num, err1 := strconv.ParseFloat(parts[0], 64)
+		den, err2 := strconv.ParseFloat(parts[1], 64)
+		if err1 == nil && err2 == nil && den != 0 {
+			return num / den
+		}
+	}
+	v, _ := strconv.ParseFloat(rate, 64)
+	return v
 }
 
 // SelectVideos opens a file dialog and returns a list of video files with basic info.
@@ -232,11 +253,13 @@ func (a *App) GetVideoMetadata(path string) (VideoFile, error) {
 	}
 
 	var videoStream FFProbeStream
+	var audioStream FFProbeStream
 	hasAudio := false
 	for _, stream := range ffprobeData.Streams {
 		if stream.CodecType == "video" {
 			videoStream = stream
-		} else if stream.CodecType == "audio" {
+		} else if stream.CodecType == "audio" && !hasAudio {
+			audioStream = stream
 			hasAudio = true
 		}
 	}
@@ -249,14 +272,21 @@ func (a *App) GetVideoMetadata(path string) (VideoFile, error) {
 	duration, _ := strconv.ParseFloat(ffprobeData.Format.Duration, 64)
 	size, _ := strconv.ParseInt(ffprobeData.Format.Size, 10, 64)
 
+	fps := parseFrameRate(videoStream.AvgFrameRate)
+	sampleRate, _ := strconv.Atoi(audioStream.SampleRate)
+
 	videoFile := VideoFile{
-		Path:       path,
-		FileName:   filepath.Base(path),
-		Size:       size,
-		Duration:   duration,
-		Resolution: fmt.Sprintf("%dx%d", videoStream.Width, videoStream.Height),
-		Codec:      videoStream.CodecName,
-		HasAudio:   hasAudio,
+		Path:          path,
+		FileName:      filepath.Base(path),
+		Size:          size,
+		Duration:      duration,
+		Resolution:    fmt.Sprintf("%dx%d", videoStream.Width, videoStream.Height),
+		Codec:         videoStream.CodecName,
+		HasAudio:      hasAudio,
+		FPS:           fps,
+		PixelFormat:   videoStream.PixFmt,
+		SampleRate:    sampleRate,
+		ChannelLayout: audioStream.ChannelLayout,
 	}
 
 	// Generate thumbnail
@@ -363,11 +393,16 @@ func looksFastMergeable(vs []VideoFile) bool {
 	if len(vs) == 0 {
 		return false
 	}
-	// YÊU CẦU TỐI THIỂU: cùng codec video, cùng WxH, cùng “có audio hay không”
-	// (Thực tế còn cần fps, pix_fmt, SAR, audio params... nhưng check tối thiểu cho nhẹ)
+	// Fast merge requires identical codec, resolution, fps, pixel format and audio params
 	base := vs[0]
 	for _, v := range vs[1:] {
-		if v.Codec != base.Codec || v.Resolution != base.Resolution || v.HasAudio != base.HasAudio {
+		if v.Codec != base.Codec ||
+			v.Resolution != base.Resolution ||
+			v.HasAudio != base.HasAudio ||
+			v.FPS != base.FPS ||
+			v.PixelFormat != base.PixelFormat ||
+			v.SampleRate != base.SampleRate ||
+			v.ChannelLayout != base.ChannelLayout {
 			return false
 		}
 	}
