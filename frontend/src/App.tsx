@@ -458,7 +458,7 @@ function App() {
                             <span className="slider"></span>
                         </label>
                         <div className="toggle-info">
-                            <label htmlFor="gpu-switch">GPU Accel</label>
+                            <label htmlFor="gpu-switch">GPU Acceleration</label>
                             <small
                                 className="meta-chip"
                                 title={
@@ -470,7 +470,9 @@ function App() {
                                 {availableGpuEncoders.length === 0
                                     ? 'GPU: Unavailable'
                                     : (useGpu
-                                        ? `GPU: On${activeEncoder ? ` (${shortEnc(activeEncoder)})` : ''}`
+                                        ? (activeEncoder && shortEnc(activeEncoder) === 'CPU'
+                                            ? 'GPU: Unavailable'
+                                            : `GPU: On${activeEncoder ? ` (${shortEnc(activeEncoder)})` : ''}`)
                                         : 'GPU: Off')}
                             </small>
                         </div>

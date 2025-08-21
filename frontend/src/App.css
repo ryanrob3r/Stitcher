@@ -393,7 +393,8 @@ p {
 .toggle-switch-container {
     display: flex;
     align-items: center;
-    gap: 15px;
+    justify-content: center;
+    gap: 15px;  
     padding: 10px;
     background-color: #253244; /* Slightly different background to group it */
     border-radius: 8px;
@@ -461,7 +462,7 @@ input:disabled + .slider {
 }
 
 .toggle-info {
-    text-align: left;
+    text-align: left
 }
 
 .toggle-info label {
