@@ -1,0 +1,6 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation (README)
+    url: https://github.com/ryanrob3r/Stitcher#readme
+    about: Review setup and usage docs before filing an issue.
+
