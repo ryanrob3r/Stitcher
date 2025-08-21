@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings" // Added for string manipulation
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -490,69 +492,100 @@ func (a *App) MergeVideos(videoFiles []VideoFile) (string, error) {
 	enc := buildVideoEncoderArgs(a.useHW, a.encAvail)
 
 	processedFilePaths := make([]string, len(videoFiles))
+	var wg sync.WaitGroup
+	errCh := make(chan error, 1)
+	var completed int32
+	total := len(videoFiles)
+
 	for i, video := range videoFiles {
-		runtime.EventsEmit(a.ctx, "mergeProgress", fmt.Sprintf("Normalizing %s...", video.FileName))
-		outputFileName := filepath.Join(tempDir, fmt.Sprintf("normalized-%d-%s", i, filepath.Base(video.Path)))
+		wg.Add(1)
+		i, video := i, video
+		go func() {
+			defer wg.Done()
+			runtime.EventsEmit(a.ctx, "mergeProgress", fmt.Sprintf("Normalizing %s...", video.FileName))
+			outputFileName := filepath.Join(tempDir, fmt.Sprintf("normalized-%d-%s", i, filepath.Base(video.Path)))
 
-		// 1) Filter video (scale + pad + fps + SAR)
-		vf := fmt.Sprintf(
-			"scale=%d:%d:force_original_aspect_ratio=decrease,setsar=1,format=yuv420p,"+
-				"pad=%d:%d:(ow-iw)/2:(oh-ih)/2,fps=30",
-			highestWidth, highestHeight, highestWidth, highestHeight)
+			// 1) Filter video (scale + pad + fps + SAR)
+			vf := fmt.Sprintf(
+				"scale=%d:%d:force_original_aspect_ratio=decrease,setsar=1,format=yuv420p,"+
+					"pad=%d:%d:(ow-iw)/2:(oh-ih)/2,fps=30",
+				highestWidth, highestHeight, highestWidth, highestHeight)
 
-		// 2) BẮT BUỘC: đưa tất cả -i (input) TRƯỚC khi -map
-		args := []string{
-			"-y", "-hide_banner", "-loglevel", "error",
-			"-i", video.Path, // input 0: file gốc
-		}
-
-		// Nếu file này không có audio và đang cần đồng bộ audio -> thêm anullsrc làm input 1
-		synthSilence := needAudioNormalize && !video.HasAudio
-		if synthSilence {
-			args = append(args,
-				"-f", "lavfi", "-t", "999999", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", // input 1
-			)
-		}
-
-		// 3) Áp filter + chọn encoder video (GPU/CPU) từ enc.Codec
-		args = append(args, "-vf", vf)
-		args = append(args, enc.Codec...)
-
-		// 4) Map stream & audio để mọi file có cùng layout
-		//    - map video chính
-		//    - bỏ phụ đề/data/metadata/chapters để không lệch số lượng stream
-		args = append(args, "-map", "0:v:0", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1")
-
-		if needAudioNormalize {
-			if video.HasAudio {
-				// Có audio -> chuẩn hóa AAC 48k stereo
-				args = append(args, "-map", "0:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2")
-			} else {
-				// Không audio -> lấy audio im lặng từ input 1
-				args = append(args, "-map", "1:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest")
+			// 2) BẮT BUỘC: đưa tất cả -i (input) TRƯỚC khi -map
+			args := []string{
+				"-y", "-hide_banner", "-loglevel", "error",
+				"-i", video.Path, // input 0: file gốc
 			}
-		} else {
-			// Tất cả cùng có hoặc cùng không có audio
-			if video.HasAudio {
-				args = append(args, "-map", "0:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2")
-			} else {
-				args = append(args, "-an")
+
+			// Nếu file này không có audio và đang cần đồng bộ audio -> thêm anullsrc làm input 1
+			synthSilence := needAudioNormalize && !video.HasAudio
+			if synthSilence {
+				args = append(args,
+					"-f", "lavfi", "-t", "999999", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", // input 1
+				)
 			}
-		}
 
-		// 5) Output đích
-		args = append(args, outputFileName)
+			// 3) Áp filter + chọn encoder video (GPU/CPU) từ enc.Codec
+			args = append(args, "-vf", vf)
+			args = append(args, enc.Codec...)
 
-		// 6) Chạy FFmpeg
-		cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
+			// 4) Map stream & audio để mọi file có cùng layout
+			//    - map video chính
+			//    - bỏ phụ đề/data/metadata/chapters để không lệch số lượng stream
+			args = append(args, "-map", "0:v:0", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1")
 
-		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("failed to normalize %s: %v\nffmpeg:\n%s", video.FileName, err, stderr.String())
-		}
+			if needAudioNormalize {
+				if video.HasAudio {
+					// Có audio -> chuẩn hóa AAC 48k stereo
+					args = append(args, "-map", "0:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2")
+				} else {
+					// Không audio -> lấy audio im lặng từ input 1
+					args = append(args, "-map", "1:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2", "-shortest")
+				}
+			} else {
+				// Tất cả cùng có hoặc cùng không có audio
+				if video.HasAudio {
+					args = append(args, "-map", "0:a:0", "-c:a", "aac", "-ar", "48000", "-ac", "2")
+				} else {
+					args = append(args, "-an")
+				}
+			}
 
-		processedFilePaths[i] = outputFileName
+			// 5) Output đích
+			args = append(args, outputFileName)
+
+			// 6) Chạy FFmpeg
+			cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+
+			if err := cmd.Run(); err != nil {
+				select {
+				case errCh <- fmt.Errorf("failed to normalize %s: %v\nffmpeg:\n%s", video.FileName, err, stderr.String()):
+				default:
+				}
+				return
+			}
+
+			processedFilePaths[i] = outputFileName
+
+			done := atomic.AddInt32(&completed, 1)
+			runtime.EventsEmit(a.ctx, "mergeProgress", fmt.Sprintf("Normalized %s (%d/%d)", video.FileName, done, total))
+		}()
+	}
+
+	doneCh := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(doneCh)
+	}()
+
+	select {
+	case err := <-errCh:
+		cancel()
+		<-doneCh
+		return "", err
+	case <-doneCh:
 	}
 
 	runtime.EventsEmit(a.ctx, "mergeProgress", "Normalization complete. Starting final merge...")
