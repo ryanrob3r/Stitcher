@@ -109,6 +109,24 @@ p {
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
+/* Estimates Panel */
+.estimates {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: #253244;
+    border-radius: 8px;
+}
+.estimates-title {
+    color: var(--accent-color);
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+.estimates-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
 .progress-section h3 {
     color: var(--accent-color);
     margin-bottom: 10px;

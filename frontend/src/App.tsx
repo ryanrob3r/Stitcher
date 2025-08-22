@@ -141,6 +141,8 @@ function App() {
     const [availableGpuEncoders, setAvailableGpuEncoders] = useState<string[]>([]);
     const [activeEncoder, setActiveEncoder] = useState<string>(""); // hiển thị encoder đang dùng
     const mergeStartRef = useRef<number | null>(null);
+    const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
+    const timerRef = useRef<number | null>(null);
     const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false);
 
     type Toast = { id: number; type: 'success' | 'error' | 'info'; message: string };
@@ -190,6 +192,40 @@ function App() {
         if (name.includes('amf')) return 'AMF';
         if (name.includes('libx264')) return 'CPU';
         return name;
+    }
+
+    function highestResolution(files: VideoFile[]) {
+        let w = 0, h = 0;
+        for (const f of files) {
+            if (f.status !== 'loaded') continue;
+            const parts = (f.resolution || '').split('x');
+            if (parts.length === 2) {
+                const pw = parseInt(parts[0], 10) || 0;
+                const ph = parseInt(parts[1], 10) || 0;
+                if (pw > w) { w = pw; h = ph; }
+            }
+        }
+        return w && h ? `${w}x${h}` : '';
+    }
+
+    function estimateOutput(files: VideoFile[]) {
+        const loaded = files.filter(f => f.status === 'loaded');
+        if (loaded.length === 0) return null;
+        const totalDuration = loaded.reduce((s, f) => s + (f.duration || 0), 0);
+        const totalSize = loaded.reduce((s, f) => s + (f.size || 0), 0);
+        const fast = isFastMergeable(loaded);
+        // Simple size estimate:
+        // - Fast merge: sum of sizes (stream copy)
+        // - Normalize: use weighted avg bitrate of inputs (≈ sum size as rough estimate)
+        const estBytes = totalSize;
+        const hasAudio = loaded.some(f => f.hasAudio);
+        return {
+            totalDuration,
+            resolution: highestResolution(loaded),
+            hasAudio,
+            fast,
+            estBytes,
+        };
     }
 
 
@@ -249,6 +285,12 @@ function App() {
             setMergeProgress(0);
             setProgressText("");
             setMergeLog("");
+            // stop & reset timer
+            if (timerRef.current) {
+                window.clearInterval(timerRef.current);
+                timerRef.current = null;
+            }
+            setElapsedSeconds(0);
             pushToast('info', 'Merge cancelled');
         });
     }, []);
@@ -369,22 +411,45 @@ function App() {
         setProgressText("");
         setMergeLog("");
         mergeStartRef.current = Date.now();
+        // start elapsed timer
+        setElapsedSeconds(0);
+        if (timerRef.current) {
+            window.clearInterval(timerRef.current);
+        }
+        timerRef.current = window.setInterval(() => {
+            if (mergeStartRef.current) {
+                const elapsed = Math.floor((Date.now() - mergeStartRef.current) / 1000);
+                setElapsedSeconds(elapsed);
+            }
+        }, 1000);
 
         MergeVideos(filesToMerge)
             .then(result => {
-                setStatusMessage(result);
+                // stop timer
+                if (timerRef.current) {
+                    window.clearInterval(timerRef.current);
+                    timerRef.current = null;
+                }
+                const finalElapsed = mergeStartRef.current ? Math.floor((Date.now() - mergeStartRef.current) / 1000) : elapsedSeconds;
+                setStatusMessage(`${result} (Completed in ${formatEta(finalElapsed)})`);
                 setVideoFiles([]);
                 setIsMerging(false);
                 setMergeProgress(100);
                 setActiveEncoder(""); // clear
                 mergeStartRef.current = null;
-                pushToast('success', 'Merge completed successfully');
+                pushToast('success', `Merge completed in ${formatEta(finalElapsed)}`);
             })
             .catch(err => {
+                // stop & reset timer
+                if (timerRef.current) {
+                    window.clearInterval(timerRef.current);
+                    timerRef.current = null;
+                }
                 setStatusMessage(`Error: ${err}`);
                 setIsMerging(false);
                 setMergeProgress(0);
                 mergeStartRef.current = null;
+                setElapsedSeconds(0);
                 pushToast('error', `Merge failed: ${err}` as string);
             });
     }
@@ -490,6 +555,29 @@ function App() {
 
                 </div>
 
+                {/* Estimated Output Panel */}
+                {videoFiles.some(f => f.status === 'loaded') && (
+                    (() => {
+                        const est = estimateOutput(videoFiles);
+                        if (!est) return null;
+                        return (
+                            <div className="estimates" aria-live="polite">
+                                <div className="estimates-title">Estimated Output</div>
+                                <div className="estimates-row">
+                                    <span className="meta-chip" title="Total play time of the merged video">Duration: {formatEta(est.totalDuration)}</span>
+                                    {est.resolution && (
+                                        <span className="meta-chip" title="Target resolution (uses the highest of the inputs)">Resolution: {est.resolution}</span>
+                                    )}
+                                    <span className="meta-chip" title="Whether the final output will contain audio tracks">Audio: {est.hasAudio ? 'Yes' : 'No'}</span>
+                                    <span className="meta-chip" title={est.fast ? 'Stream copy (no re-encode); size roughly equals sum of inputs' : 'Re-encode; size is a rough estimate based on inputs'}>
+                                        Size ≈ {formatBytes(est.estBytes)}{est.fast ? ' (stream copy)' : ''}
+                                    </span>
+                                </div>
+                            </div>
+                        );
+                    })()
+                )}
+
                 {statusMessage && <div className="status-message">{statusMessage}</div>}
 
                 {isMerging && (
@@ -498,6 +586,7 @@ function App() {
                             <div className="progress-bar" style={{ width: `${mergeProgress}%` }}></div>
                         </div>
                         <p className="progress-text">{progressText || 'Starting...'}</p>
+                        <p className="progress-text" aria-live="polite">Elapsed: {formatEta(elapsedSeconds)}</p>
                         {mergeLog && (
                             <pre className="merge-log">
                                 {mergeLog.split('\n').slice(-10).join('\n')}
