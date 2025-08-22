@@ -48,9 +48,10 @@ function formatBytes(bytes: number, decimals = 2) {
 interface VideoItemProps {
     file: VideoFile;
     onDelete: (path: string) => void;
+    baseline?: VideoFile | null;
 }
 
-function VideoItem({ file, onDelete }: VideoItemProps) {
+function VideoItem({ file, onDelete, baseline }: VideoItemProps) {
     const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id: file.path });
 
     const style = {
@@ -86,6 +87,19 @@ function VideoItem({ file, onDelete }: VideoItemProps) {
 
     const thumbnailUrl = file.thumbnailBase64 || '';
     const hasThumbnail = !!thumbnailUrl;
+    // mismatch detection vs baseline (first loaded file)
+    const approx = (a: number, b: number) => Math.abs(a - b) <= 0.05;
+    const base = baseline && baseline.status === 'loaded' ? (baseline as VideoFile) : null;
+    const compare = !!(base && file.status === 'loaded' && base.path !== file.path);
+    const mm = {
+        resolution: compare ? file.resolution !== base!.resolution : false,
+        codec: compare ? file.codec !== base!.codec : false,
+        fps: compare ? !approx(file.fps, base!.fps) : false,
+        pixfmt: compare ? file.pixelFormat !== base!.pixelFormat : false,
+        audioPresence: compare ? file.hasAudio !== base!.hasAudio : false,
+        sampleRate: compare ? (base!.hasAudio && file.hasAudio && file.sampleRate !== base!.sampleRate) : false,
+        channelLayout: compare ? (base!.hasAudio && file.hasAudio && (file.channelLayout || '') !== (base!.channelLayout || '')) : false,
+    };
 
     return (
         <div ref={setNodeRef} style={style} {...attributes} className="video-item" role="listitem">
@@ -119,10 +133,19 @@ function VideoItem({ file, onDelete }: VideoItemProps) {
             <div className="video-item-info" dir="ltr">
                 <strong className="video-filename" title={file.fileName}>{file.fileName}</strong>
                 <div className="meta-row">
-                    <span className="meta-chip">{file.resolution}</span>
-                    <span className="meta-chip">{file.codec}</span>
-                    <span className="meta-chip">{file.duration.toFixed(1)}s</span>
-                    <span className="meta-chip">{formatBytes(file.size)}</span>
+                    <span className={`meta-chip ${mm.resolution ? 'chip-warn' : ''}`} title={mm.resolution && base ? `Mismatch with baseline (${base.resolution})` : 'Resolution'}>{file.resolution}</span>
+                    <span className={`meta-chip ${mm.codec ? 'chip-warn' : ''}`} title={mm.codec && base ? `Mismatch with baseline (${base.codec})` : 'Codec'}>{file.codec}</span>
+                    <span className={`meta-chip ${mm.fps ? 'chip-warn' : ''}`} title={mm.fps && base ? `Mismatch with baseline (~${(base?.fps ?? 0).toFixed(2)} fps)` : 'Frames per second'}>{file.fps ? `${file.fps.toFixed(2)} fps` : 'fps: ?'}</span>
+                    <span className={`meta-chip ${mm.pixfmt ? 'chip-warn' : ''}`} title={mm.pixfmt && base ? `Mismatch with baseline (${base?.pixelFormat || '?'})` : 'Pixel format'}>{file.pixelFormat || 'pixfmt: ?'}</span>
+                    <span className={`meta-chip ${mm.audioPresence ? 'chip-warn' : ''}`} title={mm.audioPresence && base ? `Mismatch with baseline (${base?.hasAudio ? 'Yes' : 'No'})` : 'Audio presence'}>Audio: {file.hasAudio ? 'Yes' : 'No'}</span>
+                    {file.hasAudio && (
+                        <>
+                            <span className={`meta-chip ${mm.sampleRate ? 'chip-warn' : ''}`} title={mm.sampleRate && base ? `Mismatch with baseline (${base?.sampleRate} Hz)` : 'Sample rate'}>{file.sampleRate ? `${file.sampleRate} Hz` : 'sr: ?'}</span>
+                            <span className={`meta-chip ${mm.channelLayout ? 'chip-warn' : ''}`} title={mm.channelLayout && base ? `Mismatch with baseline (${base?.channelLayout || 'unknown'})` : 'Channel layout'}>{file.channelLayout || 'channels: ?'}</span>
+                        </>
+                    )}
+                    <span className="meta-chip" title="Clip duration">{file.duration.toFixed(1)}s</span>
+                    <span className="meta-chip" title="File size">{formatBytes(file.size)}</span>
                 </div>
             </div>
         </div>
@@ -630,9 +653,12 @@ function App() {
                                 items={videoFiles.map(file => file.path)}
                                 strategy={verticalListSortingStrategy}
                             >
-                                {videoFiles.map((file) => (
-                                    <VideoItem key={file.path} file={file} onDelete={handleDeleteVideo} />
-                                ))}
+                                {videoFiles.map((file) => {
+                                    const baseline = videoFiles.find(v => v.status === 'loaded') || null;
+                                    return (
+                                        <VideoItem key={file.path} file={file} onDelete={handleDeleteVideo} baseline={baseline} />
+                                    );
+                                })}
                             </SortableContext>
                             <DragOverlay>
                                 {activeId && activeVideoFile && activeVideoFile.status === 'loaded' ? (
